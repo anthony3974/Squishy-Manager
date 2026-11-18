@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
@@ -7,16 +8,38 @@ namespace DeepStation
     /// <summary>Procedural sprites so the prototype needs no imported art.</summary>
     public static class Sprites
     {
-        static Sprite rounded, roundedSmall, outline, circle, ring;
+        // HUD (uGUI): 100 px per unit, matching the canvas reference pixels.
+        static Sprite roundedSmall;
+        public static Sprite RoundedSmall => Cache(ref roundedSmall, () => RoundedRect(12, 0f));
+
+        // World: sizes below are in world units at scale 1.
+        static Sprite worldRounded, worldRoundedSmall, worldOutline, circle, ring, glow, pixel, pixelLeft, pixelTop;
+        /// <summary>Sliced, 0.2 unit corners.</summary>
+        public static Sprite WorldRounded => Cache(ref worldRounded, () => RoundedRect(20, 0f));
+        /// <summary>Sliced, 0.08 unit corners.</summary>
+        public static Sprite WorldRoundedSmall => Cache(ref worldRoundedSmall, () => RoundedRect(8, 0f));
+        /// <summary>Sliced outline, 0.09 units thick.</summary>
+        public static Sprite WorldOutline => Cache(ref worldOutline, () => RoundedRect(24, 9f));
+        /// <summary>1 unit diameter.</summary>
+        public static Sprite Circle => Cache(ref circle, () => Disc(0f));
+        public static Sprite Ring => Cache(ref ring, () => Disc(10f));
+        /// <summary>1 unit soft radial glow.</summary>
+        public static Sprite Glow => Cache(ref glow, RadialGlow);
+        /// <summary>1 unit white square, pivot centre.</summary>
+        public static Sprite Pixel => Cache(ref pixel, () => Square(new Vector2(0.5f, 0.5f)));
+        /// <summary>1 unit white square, pivot left edge (for meter fills).</summary>
+        public static Sprite PixelLeft => Cache(ref pixelLeft, () => Square(new Vector2(0f, 0.5f)));
+        /// <summary>1 unit white square, pivot top edge (for swinging legs).</summary>
+        public static Sprite PixelTop => Cache(ref pixelTop, () => Square(new Vector2(0.5f, 1f)));
 
         // Explicit == null (not ??=) so Unity's destroyed-object check applies.
-        public static Sprite Rounded { get { if (rounded == null) rounded = RoundedRect(24, 0f); return rounded; } }
-        public static Sprite RoundedSmall { get { if (roundedSmall == null) roundedSmall = RoundedRect(12, 0f); return roundedSmall; } }
-        public static Sprite Outline { get { if (outline == null) outline = RoundedRect(24, 4f); return outline; } }
-        public static Sprite Circle { get { if (circle == null) circle = Disc(128, 0f); return circle; } }
-        public static Sprite Ring { get { if (ring == null) ring = Disc(128, 7f); return ring; } }
+        static Sprite Cache(ref Sprite sprite, Func<Sprite> make)
+        {
+            if (sprite == null) sprite = make();
+            return sprite;
+        }
 
-        /// <summary>9-sliced rounded rectangle; thickness 0 means filled, otherwise an outline.</summary>
+        /// <summary>9-sliced rounded rectangle at 100 px per unit; thickness 0 means filled.</summary>
         static Sprite RoundedRect(int radius, float thickness)
         {
             int size = radius * 2 + 2;
@@ -38,8 +61,9 @@ namespace DeepStation
                 SpriteMeshType.FullRect, new Vector4(radius, radius, radius, radius));
         }
 
-        static Sprite Disc(int size, float thickness)
+        static Sprite Disc(float thickness)
         {
+            const int size = 128;
             var tex = NewTexture(size, size);
             var pixels = new Color32[size * size];
             float half = size * 0.5f;
@@ -51,7 +75,36 @@ namespace DeepStation
             }
             tex.SetPixels32(pixels);
             tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f);
+            return Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), size);
+        }
+
+        static Sprite RadialGlow()
+        {
+            const int size = 128;
+            var tex = NewTexture(size, size);
+            var pixels = new Color32[size * size];
+            float half = size * 0.5f;
+            for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+            {
+                float r = Mathf.Clamp01(new Vector2(x + 0.5f - half, y + 0.5f - half).magnitude / half);
+                float a = (1f - r) * (1f - r);
+                pixels[y * size + x] = new Color(1f, 1f, 1f, a);
+            }
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), size);
+        }
+
+        static Sprite Square(Vector2 pivot)
+        {
+            const int size = 4;
+            var tex = NewTexture(size, size);
+            var pixels = new Color32[size * size];
+            for (int i = 0; i < pixels.Length; i++) pixels[i] = new Color32(255, 255, 255, 255);
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, size, size), pivot, size, 0, SpriteMeshType.FullRect);
         }
 
         /// <summary>Anti-aliased coverage from a signed distance (negative = inside).</summary>
@@ -62,14 +115,20 @@ namespace DeepStation
             return outer - Mathf.Clamp01(0.5f - (d + thickness));
         }
 
-        public static Sprite VerticalGradient(Color top, Color bottom)
+        /// <summary>1 x 1 unit vertical gradient through evenly spaced colours, listed top to bottom.</summary>
+        public static Sprite VerticalGradient(params Color[] topToBottom)
         {
-            const int h = 64;
+            const int h = 128;
             var tex = NewTexture(1, h);
+            int segments = topToBottom.Length - 1;
             for (int y = 0; y < h; y++)
-                tex.SetPixel(0, y, Color.Lerp(bottom, top, y / (h - 1f)));
+            {
+                float t = (1f - y / (h - 1f)) * segments;
+                int i = Mathf.Min(Mathf.FloorToInt(t), segments - 1);
+                tex.SetPixel(0, y, Color.Lerp(topToBottom[i], topToBottom[i + 1], t - i));
+            }
             tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, 1, h), new Vector2(0.5f, 0.5f), 100f);
+            return Sprite.Create(tex, new Rect(0, 0, 1, h), new Vector2(0.5f, 0.5f), h, 0, SpriteMeshType.FullRect);
         }
 
         static Texture2D NewTexture(int w, int h)

@@ -1,22 +1,24 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
 namespace DeepStation
 {
     /// <summary>
-    /// The simulation: two station-wide resources (oxygen, power), six rooms, three crew.
-    /// Knows nothing about UI; StationUI reads its state every frame.
+    /// The simulation: two station-wide resources (oxygen, power), three rooms, three crew who
+    /// walk between them. Knows nothing about rendering; StationView and StationHud read it.
     /// </summary>
     public class Station : MonoBehaviour
     {
-        public const int FloorCount = 3;
-        public const int ColumnCount = 2;
         public const float MaxStamina = 100f;
 
         public StationTuning tuning = new StationTuning();
 
         public readonly List<Room> Rooms = new List<Room>();
         public readonly List<CrewMember> Crew = new List<CrewMember>();
+
+        /// <summary>Raised after ResetStation replaces the rooms and crew.</summary>
+        public event Action Rebuilt;
 
         public float Oxygen { get; private set; }
         public float Power { get; private set; }
@@ -29,8 +31,9 @@ namespace DeepStation
         public float SuffocationTime { get; private set; }
         public float Elapsed { get; private set; }
         public bool IsLost { get; private set; }
-        public bool Paused { get; set; }
+        public float RestartIn { get; private set; }
 
+        public int FloorCount { get; private set; }
         public bool OxygenLow => Oxygen <= tuning.maxOxygen * tuning.lowWarning;
         public bool PowerLow => Power <= tuning.maxPower * tuning.lowWarning;
         public float SuffocationLeft => Mathf.Max(0f, tuning.suffocationSeconds - SuffocationTime);
@@ -39,8 +42,13 @@ namespace DeepStation
 
         void Update()
         {
-            if (!Paused && !IsLost)
-                Tick(Time.deltaTime);
+            if (IsLost)
+            {
+                RestartIn -= Time.deltaTime;
+                if (RestartIn <= 0f) ResetStation();
+                return;
+            }
+            Tick(Time.deltaTime);
         }
 
         public void ResetStation()
@@ -48,43 +56,44 @@ namespace DeepStation
             Rooms.Clear();
             Crew.Clear();
 
-            var quartersA = AddRoom("Quarters A", RoomType.Quarters, 0, 0, 2);
-            var generatorA = AddRoom("Generator A", RoomType.Generator, 0, 1, 1);
-            var scrubberA = AddRoom("Scrubber A", RoomType.Scrubber, 1, 0, 1);
-            AddRoom("Generator B", RoomType.Generator, 1, 1, 1);
-            AddRoom("Scrubber B", RoomType.Scrubber, 2, 0, 1);
-            AddRoom("Quarters B", RoomType.Quarters, 2, 1, 2);
+            var quarters = AddRoom("Living Quarters", RoomType.Quarters, 0, 0);
+            var scrubber = AddRoom("Oxygen Scrubber", RoomType.Scrubber, 0, 1);
+            var generator = AddRoom("Generator", RoomType.Generator, 1, 0);
 
-            AddCrew("Mara", new Color32(255, 122, 100, 255), 100f, generatorA);
-            AddCrew("Theo", new Color32(186, 236, 92, 255), 75f, scrubberA);
-            AddCrew("Juno", new Color32(255, 134, 206, 255), 40f, quartersA);
+            AddCrew("Mara", new Color32(240, 200, 110, 255), 100f, generator);
+            AddCrew("Theo", new Color32(110, 215, 200, 255), 75f, scrubber);
+            AddCrew("Juno", new Color32(190, 165, 245, 255), 40f, quarters);
+
+            FloorCount = 0;
+            foreach (var room in Rooms) FloorCount = Mathf.Max(FloorCount, room.Floor + 1);
 
             Oxygen = tuning.startOxygen;
             Power = tuning.startPower;
             Elapsed = 0f;
             SuffocationTime = 0f;
             IsLost = false;
-            Paused = false;
             Tick(0f);
+            Rebuilt?.Invoke();
         }
 
-        Room AddRoom(string name, RoomType type, int floor, int column, int capacity)
+        Room AddRoom(string name, RoomType type, int floor, int column)
         {
-            var room = new Room(name, type, floor, column, capacity);
+            var room = new Room(name, type, floor, column, capacity: 2);
             Rooms.Add(room);
             return room;
         }
 
         void AddCrew(string name, Color color, float stamina, Room room)
         {
-            var crew = new CrewMember(name, color, stamina) { Room = room };
+            var crew = new CrewMember(name, color, stamina) { Room = room, Slot = room.FreeSlot() };
+            crew.Position = room.Slots[crew.Slot];
             room.Assigned.Add(crew);
             Crew.Add(crew);
         }
 
         /// <summary>
-        /// Send a crew member to a room. If the room is full, its last occupant swaps
-        /// into the sender's old room so a tap never fails silently.
+        /// Send a crew member to a room. If the room is full, one occupant swaps into the
+        /// sender's old spot so a tap never fails silently.
         /// </summary>
         public bool Send(CrewMember crew, Room target)
         {
@@ -92,25 +101,28 @@ namespace DeepStation
                 return false;
 
             var from = crew.Room;
+            int fromSlot = crew.Slot;
             from.Assigned.Remove(crew);
 
-            if (target.Assigned.Count >= target.Capacity)
+            int slot = target.FreeSlot();
+            if (slot < 0)
             {
                 var swapped = target.Assigned[target.Assigned.Count - 1];
+                slot = swapped.Slot;
                 target.Assigned.Remove(swapped);
-                MoveTo(swapped, from);
+                Assign(swapped, from, fromSlot);
             }
 
-            MoveTo(crew, target);
+            Assign(crew, target, slot);
             return true;
         }
 
-        void MoveTo(CrewMember crew, Room room)
+        static void Assign(CrewMember crew, Room room, int slot)
         {
             room.Assigned.Add(crew);
             crew.Room = room;
-            crew.TravelLeft = tuning.travelSeconds;
-            crew.MoveId++;
+            crew.Slot = slot;
+            StationLayout.BuildPath(crew.Position, room.Slots[slot], crew.Path);
         }
 
         float Efficiency(CrewMember crew) => crew.IsExhausted ? tuning.exhaustedEfficiency : 1f;
@@ -120,8 +132,7 @@ namespace DeepStation
             Elapsed += dt;
 
             foreach (var crew in Crew)
-                if (crew.TravelLeft > 0f)
-                    crew.TravelLeft = Mathf.Max(0f, crew.TravelLeft - dt);
+                Walk(crew, dt);
 
             // Who is actually on the job, and what does that make and cost?
             float powerMade = 0f;
@@ -173,7 +184,7 @@ namespace DeepStation
             OxygenRate = oxygenMade - Crew.Count * tuning.breathePerCrew;
             Oxygen = Mathf.Clamp(Oxygen + OxygenRate * dt, 0f, tuning.maxOxygen);
 
-            // Stamina: work drains it, Quarters restore it.
+            // Stamina: work drains it, Quarters restore it. Walking does neither.
             float restSpeed = Mathf.Lerp(tuning.unpoweredRestFactor, 1f, supply);
             foreach (var crew in Crew)
             {
@@ -189,7 +200,10 @@ namespace DeepStation
             {
                 SuffocationTime += dt;
                 if (SuffocationTime >= tuning.suffocationSeconds)
+                {
                     IsLost = true;
+                    RestartIn = tuning.restartDelay;
+                }
             }
             else
             {
@@ -200,48 +214,82 @@ namespace DeepStation
                 UpdateStatus(room, supply);
         }
 
+        void Walk(CrewMember crew, float dt)
+        {
+            float budget = dt;
+            while (budget > 0f && crew.Path.Count > 0)
+            {
+                Vector2 target = crew.Path[0];
+                Vector2 delta = target - crew.Position;
+                float distance = delta.magnitude;
+                bool vertical = Mathf.Abs(delta.y) > Mathf.Abs(delta.x);
+                float speed = Mathf.Max(0.1f, vertical ? tuning.climbSpeed : tuning.walkSpeed);
+
+                if (distance > 0.0001f)
+                {
+                    crew.Climbing = vertical;
+                    if (!vertical) crew.FacingRight = delta.x > 0f;
+                }
+
+                float step = speed * budget;
+                if (step >= distance)
+                {
+                    crew.Position = target;
+                    crew.Path.RemoveAt(0);
+                    budget -= distance / speed;
+                }
+                else
+                {
+                    crew.Position += delta / distance * step;
+                    budget = 0f;
+                }
+            }
+
+            if (crew.Path.Count == 0)
+            {
+                crew.Climbing = false;
+                // Face the room's equipment while working.
+                crew.FacingRight = crew.Position.x < crew.Room.Bounds.center.x;
+            }
+        }
+
         void UpdateStatus(Room room, float supply)
         {
-            bool enRoute = room.Present == 0 && room.Assigned.Count > 0;
+            bool helpComing = room.Present == 0 && room.Assigned.Count > 0;
             bool tired = room.Present > 0 && room.Workforce < room.Present - 0.001f;
-            int supplyPercent = Mathf.RoundToInt(supply * 100f);
 
             switch (room.Type)
             {
                 case RoomType.Generator:
-                    room.RateText = room.Present > 0
-                        ? $"+{room.Workforce * tuning.generatorPower:0.0} power/s"
-                        : $"Makes +{tuning.generatorPower:0.0} power/s per crew";
-                    if (enRoute) Set(room, RoomAlert.Idle, "Crew on the way");
-                    else if (room.Present == 0)
-                        Set(room, PowerLow ? RoomAlert.Failing : RoomAlert.Idle,
-                            PowerLow ? "POWER LOW: send crew here" : "Idle: needs crew");
-                    else if (tired) Set(room, RoomAlert.Warning, "Crew exhausted: half output");
-                    else Set(room, RoomAlert.Ok, "Generating");
+                    room.Meter = room.Workforce / room.Capacity;
+                    room.RateText = room.Present > 0 ? $"+{room.Workforce * tuning.generatorPower:0.0} power/s" : "idle";
+                    if (room.Present == 0)
+                        Set(room, PowerLow && !helpComing ? RoomAlert.Failing : RoomAlert.Idle, "NO CREW");
+                    else if (tired) Set(room, RoomAlert.Warning, "TIRED CREW");
+                    else Set(room, RoomAlert.Ok, "");
                     break;
 
                 case RoomType.Scrubber:
+                    room.Meter = room.Workforce * supply / room.Capacity;
                     room.RateText = room.Present > 0
-                        ? $"+{room.Workforce * tuning.scrubberOxygen * supply:0.0} O2/s   -{room.Present * tuning.scrubberPower * supply:0.0} power/s"
-                        : $"Makes +{tuning.scrubberOxygen:0.0} O2/s, uses {tuning.scrubberPower:0.0} power/s";
-                    if (enRoute) Set(room, RoomAlert.Idle, "Crew on the way");
-                    else if (room.Present == 0)
-                        Set(room, OxygenLow ? RoomAlert.Failing : RoomAlert.Idle,
-                            OxygenLow ? "OXYGEN LOW: send crew here" : "Idle: needs crew");
-                    else if (supply < 0.02f) Set(room, RoomAlert.Failing, "NO POWER: scrubber stopped");
-                    else if (supply < 0.98f) Set(room, RoomAlert.Failing, $"LOW POWER: running at {supplyPercent}%");
-                    else if (tired) Set(room, RoomAlert.Warning, "Crew exhausted: half output");
-                    else Set(room, RoomAlert.Ok, "Scrubbing");
+                        ? $"+{room.Workforce * tuning.scrubberOxygen * supply:0.0} O2/s  -{room.Present * tuning.scrubberPower * supply:0.0} power/s"
+                        : "idle";
+                    if (room.Present == 0)
+                        Set(room, OxygenLow && !helpComing ? RoomAlert.Failing : RoomAlert.Idle, "NO CREW");
+                    else if (supply < 0.02f) Set(room, RoomAlert.Failing, "NO POWER");
+                    else if (supply < 0.98f) Set(room, RoomAlert.Failing, $"LOW POWER {Mathf.RoundToInt(supply * 100f)}%");
+                    else if (tired) Set(room, RoomAlert.Warning, "TIRED CREW");
+                    else Set(room, RoomAlert.Ok, "");
                     break;
 
                 case RoomType.Quarters:
-                    room.RateText = room.Present > 0
-                        ? $"+{tuning.restStaminaGain * Mathf.Lerp(tuning.unpoweredRestFactor, 1f, supply):0.0} stamina/s each   -{room.Present * tuning.quartersPowerPerCrew * supply:0.0} power/s"
-                        : $"Rest: +{tuning.restStaminaGain:0.0} stamina/s, uses {tuning.quartersPowerPerCrew:0.0} power/s each";
-                    if (enRoute) Set(room, RoomAlert.Idle, "Crew on the way");
-                    else if (room.Present == 0) Set(room, RoomAlert.Idle, "Empty: crew rest here");
-                    else if (supply < 0.98f) Set(room, RoomAlert.Warning, "No power: resting slowly");
-                    else Set(room, RoomAlert.Ok, "Resting");
+                    float stamina = 0f;
+                    foreach (var crew in room.Assigned)
+                        if (!crew.IsMoving) stamina += crew.Stamina;
+                    room.Meter = room.Present > 0 ? stamina / (room.Present * MaxStamina) : 0f;
+                    room.RateText = room.Present > 0 ? $"{room.Present} resting  -{room.Present * tuning.quartersPowerPerCrew * supply:0.0} power/s" : "empty";
+                    if (room.Present > 0 && supply < 0.98f) Set(room, RoomAlert.Warning, "NO POWER: SLOW REST");
+                    else Set(room, room.Present > 0 ? RoomAlert.Ok : RoomAlert.Idle, "");
                     break;
             }
         }

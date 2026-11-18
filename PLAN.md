@@ -12,13 +12,14 @@
 - Oxygen and power tick up and down; a red warning shows which room is failing
 - **Goal:** is keeping the station balanced fun for 5 minutes?
 
-What was built:
+What was built (side-on cutaway version):
 
-- 3 floors × 2 rooms: 2 Quarters, 2 Scrubbers, 2 Generators
-- Crew stamina drains while working and refills in Quarters, so the 3 crew have to rotate
-- Exhausted crew keep working at half speed instead of stopping
-- Running out of oxygen starts a 20 s countdown, so you can still recover before the run ends
-- Every rate is shown on screen: per room, per resource bar, and "empty in Ns"
+- Side-on cutaway of the station in dark teal water, with drifting bioluminescent critters. Drag to scroll up and down.
+- 3 rooms on 2 floors linked by a ladder shaft: Living Quarters and Oxygen Scrubber on top, Generator below. Each room holds 2 crew.
+- Crew walk along the floors and climb the ladder. They lean into the machines while working and lie in the bunks while resting.
+- Each room shows a meter and its live rate above it, and flashes a red outline when it's failing.
+- Stamina drains while working and refills in Quarters, so the 3 crew have to rotate. Exhausted crew keep working at half speed instead of stopping.
+- Running out of oxygen starts a 20 s countdown, so you can still recover. If it runs out, a new dive starts automatically. There are no menus.
 
 ## Phase 2: Failure and recovery
 
@@ -42,6 +43,17 @@ What was built:
 
 - More room types, crew traits, random events
 - A goal or ending so runs feel like they're going somewhere
+
+## Visual direction
+
+- Side-on cutaway like an ant farm: a vertical stack of floors, rooms side by side, each a visible box with floor, walls and a glowing window
+- Portrait, 2D, flat simple shapes. The camera scrolls vertically, and new floors appear below.
+- Ocean outside gets darker and bluer with depth, with faint drifting bioluminescent creatures
+- Crew are small visible characters who walk the floors and use ladders between levels, and look busy while working
+- Each room shows its status on itself: a small meter above it and a red flashing outline when failing
+- Oxygen and power only, in a slim bar at the top. No resource sliders.
+- Deep blue and teal outside, warm amber light spilling from the rooms, red only for warnings
+- No menus or upgrade screens until asked for
 
 ## Guardrails (fixing the Oxygen Not Included problems)
 

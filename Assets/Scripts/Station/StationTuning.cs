@@ -25,13 +25,17 @@ namespace DeepStation
         public float restStaminaGain = 4f;
         [Tooltip("Output multiplier for a crew member at 0 stamina. They keep working, just slower.")]
         [Range(0f, 1f)] public float exhaustedEfficiency = 0.5f;
-        [Tooltip("Seconds a crew member spends walking between rooms.")]
-        public float travelSeconds = 1f;
+        [Tooltip("World units per second walking along a floor.")]
+        public float walkSpeed = 2.4f;
+        [Tooltip("World units per second climbing the ladder.")]
+        public float climbSpeed = 1.8f;
 
         [Header("Rooms")]
+        [Tooltip("Power per second for each crew member working the Generator.")]
         public float generatorPower = 3f;
+        [Tooltip("Oxygen per second for each crew member working the Scrubber.")]
         public float scrubberOxygen = 4f;
-        [Tooltip("Power a staffed Scrubber draws per second.")]
+        [Tooltip("Power per second each crew member working the Scrubber draws.")]
         public float scrubberPower = 2.5f;
         [Tooltip("Power each resting crew member draws per second in Quarters.")]
         public float quartersPowerPerCrew = 0.5f;
@@ -45,5 +49,7 @@ namespace DeepStation
         public float tiredStamina = 25f;
         [Tooltip("Seconds at zero oxygen before the station is lost.")]
         public float suffocationSeconds = 20f;
+        [Tooltip("Seconds the 'station lost' message shows before a fresh dive starts.")]
+        public float restartDelay = 4f;
     }
 }
