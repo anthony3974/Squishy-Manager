@@ -13,7 +13,7 @@ namespace DeepStation
         public static Sprite RoundedSmall => Cache(ref roundedSmall, () => RoundedRect(12, 0f));
 
         // World: sizes below are in world units at scale 1.
-        static Sprite worldRounded, worldRoundedSmall, worldOutline, circle, ring, glow, pixel, pixelLeft, pixelTop;
+        static Sprite worldRounded, worldRoundedSmall, worldOutline, circle, ring, glow, pixel, pixelLeft, pixelTop, pixelBottom;
         /// <summary>Sliced, 0.2 unit corners.</summary>
         public static Sprite WorldRounded => Cache(ref worldRounded, () => RoundedRect(20, 0f));
         /// <summary>Sliced, 0.08 unit corners.</summary>
@@ -31,6 +31,8 @@ namespace DeepStation
         public static Sprite PixelLeft => Cache(ref pixelLeft, () => Square(new Vector2(0f, 0.5f)));
         /// <summary>1 unit white square, pivot top edge (for swinging legs).</summary>
         public static Sprite PixelTop => Cache(ref pixelTop, () => Square(new Vector2(0.5f, 1f)));
+        /// <summary>1 unit white square, pivot bottom edge (for vertical fills).</summary>
+        public static Sprite PixelBottom => Cache(ref pixelBottom, () => Square(new Vector2(0.5f, 0f)));
 
         // Explicit == null (not ??=) so Unity's destroyed-object check applies.
         static Sprite Cache(ref Sprite sprite, Func<Sprite> make)

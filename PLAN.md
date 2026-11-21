@@ -2,9 +2,9 @@
 
 **Core idea:** Expand a research station downward, room by room. Three resources (oxygen, power, heat), visible failures, and slow fallbacks so one mistake never snowballs.
 
-**Current status:** Phase 1 built, being playtested. Nothing past Phase 1 gets built until the core loop feels good.
+**Current status:** Phases 1 and 2 and the casual pass (see below) are built, playtested, and released as version 0.1.0 on the F-Droid repo. Phase 3 is next.
 
-## Phase 1: Prototype (the fun test) ✅ built
+## Phase 1: Prototype (the fun test) ✅ built, playtested
 
 - Unity, portrait mode, tested on a phone along the way
 - A grid of rooms with 3 types: Living Quarters, Scrubber (oxygen), Generator (power)
@@ -21,12 +21,31 @@ What was built (side-on cutaway version):
 - Stamina drains while working and refills in Quarters, so the 3 crew have to rotate. Exhausted crew keep working at half speed instead of stopping.
 - Running out of oxygen starts a 20 s countdown, so you can still recover. If it runs out, a new dive starts automatically. There are no menus.
 
-## Phase 2: Failure and recovery
+## Phase 2: Failure and recovery ✅ built, playtested
 
 - Breakdowns on a timer, each with a clear red indicator
 - Emergency tanks buy time instead of instant death
 - Crew can repair rooms, with a short cooldown
 - **Goal:** a mistake costs you something but never ends the run
+
+What was built:
+
+- The Generator and Scrubber wear only while running and break after 60–100 s of running time. For 10 s beforehand they rattle, shake and smoke (amber **RATTLING**), so no breakdown comes without warning.
+- A broken machine stops, smokes and sparks, and flashes red when nobody is on the way to fix it. It turns amber once crew are repairing it or walking over.
+- Crew in a broken room repair it on their own: about 8 s alone, 4 s with two. They hammer at the machine, and the room meter shows repair progress. Repairs drain stamina faster than work.
+- After a repair, that crew member has a 12 s cooldown before they can repair again (wrench and bar above their head).
+- Two emergency O2 tanks hang under the station, also shown as pips in the top bar. When oxygen hits 0, the fullest one vents (+40 O2 over 8 s) before the suffocation countdown can start. Tanks slowly refill from spare air while oxygen is above 90%, so the cost of running dry is a used tank, not the run.
+
+## Casual pass (between Phases 2 and 3)
+
+The loop worked but was too stressful: constantly rotating crew to keep two meters up is plate-spinning. This pass makes the game handle the boring upkeep so the player only makes interesting choices. It changes behavior, not visuals, and adds no new floors, hazards or resources.
+
+1. **Auto-rest** ✅ built. Tired crew (stamina 20) walk to Quarters on their own and go back to their job once rested.
+2. **Set-a-job assignment** ✅ built. A tap sets a standing job that lasts through rests and repairs. A badge over each crew member's head shows it.
+3. **Slower pacing** ✅ built. A Pacing block at the top of `StationTuning.cs`: drains, breakdowns and production are all about 2.5x slower, so the balance between rooms is unchanged. In a rough model, the starting jobs stay healthy untouched for 20 minutes (oxygen never below about 58), while a station with nobody on the scrubber takes about 3 minutes to run out of air instead of about 1.
+4. **Softer failure** ✅ built. No game over and no "station lost" restart. With both tanks empty at 0 O2, a 20 s countdown runs, then every crew member faints for 30 s (circling stars, a wake-up bar, **CREW FAINTED** on the room) and wakes with a fresh 20 s grace period. The bottom hint names the cause.
+5. **Crew feel like people** ✅ built. Each crew member has one trait with a small, shown effect (Mara Tireless, Theo Tinkerer, Juno Quick napper). One thought bubble at a time, mostly hints while something's wrong and small talk otherwise. Crew who aren't working idle (foot tap, glance, stretch), and fully rested off-duty crew get up out of bed.
+6. **Small rewards** ✅ built. Sparkle burst and a floating "Fixed!" on every repair. Calm toasts for minutes survived, tanks refilled, and air restored. No menus.
 
 ## Phase 3: Expansion and depth
 
@@ -41,7 +60,7 @@ What was built (side-on cutaway version):
 
 ## Phase 5: Content
 
-- More room types, crew traits, random events
+- More room types, more crew traits (the first three came in the casual pass), random events
 - A goal or ending so runs feel like they're going somewhere
 
 ## Visual direction

@@ -1,11 +1,13 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 
 namespace DeepStation
 {
     /// <summary>
-    /// The only screen-space UI: a slim oxygen/power bar along the top, a warning line under it
-    /// when something is critical, and a one-line hint at the bottom. Nothing here is tappable.
+    /// The only screen-space UI: a slim oxygen/power bar along the top (with emergency tank pips
+    /// beside OXYGEN), a warning line under it when something is critical, and a one-line hint at
+    /// the bottom. Nothing here is tappable.
     /// </summary>
     [RequireComponent(typeof(Station), typeof(StationView))]
     public class StationHud : MonoBehaviour
@@ -20,6 +22,7 @@ namespace DeepStation
 
         class Bar
         {
+            public RectTransform Root;
             public Image Fill;
             public Text Value;
             public Color Color;
@@ -29,14 +32,44 @@ namespace DeepStation
         StationView view;
         Bar oxygen, power;
         Image warningBackground;
-        Text warningText, hintText, lostText;
-        GameObject lostOverlay;
+        Text warningText, hintText;
+
+        // Milestone toast: a short, calm pop-up under the top bar. Queued so none are lost.
+        const float ToastSeconds = 2.8f;
+        readonly Queue<string> toasts = new Queue<string>();
+        CanvasGroup toastGroup;
+        Text toastText;
+        float toastAge = float.MaxValue;
+        readonly List<Image> tankPips = new List<Image>();
 
         void Start()
         {
             station = GetComponent<Station>();
             view = GetComponent<StationView>();
             Build();
+            station.Milestone += toasts.Enqueue;
+        }
+
+        void OnDestroy()
+        {
+            if (station != null) station.Milestone -= toasts.Enqueue;
+        }
+
+        void UpdateToast(float dt)
+        {
+            toastAge += dt;
+            if (toastAge >= ToastSeconds && toasts.Count > 0)
+            {
+                toastText.text = toasts.Dequeue();
+                toastAge = 0f;
+            }
+            bool showing = toastAge < ToastSeconds;
+            toastGroup.gameObject.SetActive(showing);
+            if (!showing) return;
+            toastGroup.alpha = Mathf.Clamp01(Mathf.Min(toastAge / 0.25f, (ToastSeconds - toastAge) / 0.5f));
+            // A small pop as it appears.
+            float pop = 1f + 0.08f * Mathf.Sin(Mathf.Clamp01(toastAge / 0.3f) * Mathf.PI);
+            toastGroup.transform.localScale = new Vector3(pop, pop, 1f);
         }
 
         void Update()
@@ -47,12 +80,27 @@ namespace DeepStation
 
             UpdateBar(oxygen, station.Oxygen, t.maxOxygen, station.OxygenRate, t.lowWarning, pulse);
             UpdateBar(power, station.Power, t.maxPower, station.PowerRate, t.lowWarning, pulse);
+            UpdateTankPips(pulse);
+            UpdateToast(Time.unscaledDeltaTime);
 
             string warning = null;
-            if (!station.IsLost && station.SuffocationTime > 0f)
-                warning = $"OUT OF AIR  ·  crew lost in {Mathf.CeilToInt(station.SuffocationLeft)}s";
-            else if (!station.IsLost && station.PowerSupply < 0.98f)
+            if (station.FaintedCount > 0)
+                warning = $"CREW FAINTED: NO AIR  ·  waking in {Mathf.CeilToInt(station.WakeIn)}s";
+            else if (station.SuffocationTime > 0f)
+                warning = $"OUT OF AIR  ·  crew faint in {Mathf.CeilToInt(station.SuffocationLeft)}s";
+            else if (station.VentingTank != null)
+                warning = $"EMERGENCY O2 VENTING  ·  {station.FullTanks} tank{(station.FullTanks == 1 ? "" : "s")} left";
+            else if (station.PowerSupply < 0.98f)
                 warning = "BLACKOUT  ·  scrubber is stalling";
+            else
+            {
+                foreach (var room in station.Rooms)
+                    if (room.Broken && room.Alert == RoomAlert.Failing)
+                    {
+                        warning = $"{room.Name.ToUpperInvariant()} BROKEN  ·  send crew to repair";
+                        break;
+                    }
+            }
             warningBackground.gameObject.SetActive(warning != null);
             if (warning != null)
             {
@@ -60,16 +108,34 @@ namespace DeepStation
                 warningBackground.color = Color.Lerp(new Color(0.45f, 0.04f, 0.05f, 0.92f), new Color(0.75f, 0.1f, 0.1f, 0.92f), pulse);
             }
 
-            if (station.IsLost)
-                hintText.text = "";
-            else if (view.Selected != null)
-                hintText.text = $"Send {view.Selected.Name}: tap a room";
+            if (view.Selected != null)
+                hintText.text = $"Give {view.Selected.Name} a job: tap a room\n<size=26>{station.TraitText(view.Selected)}</size>";
+            else if (station.FaintedCount > 0 || station.SuffocationTime > 0f)
+                hintText.text = AirHint();
             else
-                hintText.text = "Tap a crew member, then tap a room";
+                hintText.text = "Tap a crew member, then a room to give them a job";
+        }
 
-            lostOverlay.SetActive(station.IsLost);
-            if (station.IsLost)
-                lostText.text = $"STATION LOST\n<size=40>Held on for {Format(station.Elapsed)}. New dive in {Mathf.CeilToInt(Mathf.Max(0f, station.RestartIn))}…</size>";
+        /// <summary>While the air is out, name the fix: who's missing, or what's stopping the scrubber.</summary>
+        string AirHint()
+        {
+            foreach (var room in station.Rooms)
+            {
+                if (room.Type != RoomType.Scrubber) continue;
+                CrewMember holder = null;
+                bool atPost = false;
+                foreach (var crew in station.Crew)
+                {
+                    if (crew.Job != room) continue;
+                    holder = crew;
+                    if (crew.Room == room) atPost = true;
+                }
+                if (holder == null) return "Nobody's on the Oxygen Scrubber: give someone that job";
+                if (!atPost) return $"{holder.Name} is resting: send them to the Scrubber early";
+                if (room.Broken) return "The Oxygen Scrubber is broken: its crew will fix it";
+            }
+            if (station.PowerSupply < 0.98f) return "The scrubber needs power: put someone on the Generator";
+            return station.FaintedCount > 0 ? "The crew will come round soon" : "Air is on its way";
         }
 
         void UpdateBar(Bar bar, float value, float max, float rate, float low, float pulse)
@@ -86,10 +152,32 @@ namespace DeepStation
             bar.Value.text = $"{value:0} <color={rateColor}>{rateText}</color>";
         }
 
-        static string Format(float seconds)
+        /// <summary>One small pip per emergency tank, filled to its level, next to the OXYGEN label.</summary>
+        void UpdateTankPips(float pulse)
         {
-            int s = Mathf.FloorToInt(seconds);
-            return $"{s / 60}:{s % 60:00}";
+            if (tankPips.Count != station.Tanks.Count)
+            {
+                foreach (var pip in tankPips) Destroy(pip.transform.parent.gameObject);
+                tankPips.Clear();
+                for (int i = 0; i < station.Tanks.Count; i++)
+                {
+                    var back = UI.Image("Tank", oxygen.Root, Sprites.RoundedSmall, new Color32(2, 8, 14, 255));
+                    UI.Pin(back.rectTransform, new Vector2(0f, 1f), new Vector2(129f + i * 22f, -22f), new Vector2(14f, 26f));
+                    var fill = UI.Image("Fill", back.rectTransform, Sprites.RoundedSmall, Teal);
+                    UI.Stretch(fill.rectTransform);
+                    tankPips.Add(fill);
+                }
+            }
+
+            for (int i = 0; i < tankPips.Count; i++)
+            {
+                var tank = station.Tanks[i];
+                var pip = tankPips[i];
+                pip.enabled = tank.Fill > 0.01f;
+                pip.rectTransform.anchorMax = new Vector2(1f, Mathf.Clamp01(tank.Fill));
+                pip.color = station.VentingTank == tank ? Color.Lerp(Teal, Color.white, 0.5f * pulse)
+                    : tank.IsFull ? Teal : new Color(Teal.r, Teal.g, Teal.b, 0.5f);
+            }
         }
 
         // ------------------------------------------------------------------ building
@@ -124,18 +212,22 @@ namespace DeepStation
             UI.Place(hintText.rectTransform, Vector2.zero, new Vector2(1f, 0f), new Vector2(24f, 24f), new Vector2(-24f, 104f));
             hintText.gameObject.AddComponent<Shadow>().effectColor = new Color(0f, 0f, 0f, 0.8f);
 
-            var overlay = UI.Image("Station Lost", root, null, new Color(0f, 0.01f, 0.03f, 0.7f));
-            UI.Stretch(overlay.rectTransform);
-            lostOverlay = overlay.gameObject;
-            lostText = UI.Text("Text", overlay.rectTransform, 80, WarningRed, TextAnchor.MiddleCenter, FontStyle.Bold);
-            UI.Place(lostText.rectTransform, Vector2.zero, Vector2.one, new Vector2(40f, 0f), new Vector2(-40f, 0f));
-            lostOverlay.SetActive(false);
+            // Sits below the warning line so a good moment never hides a warning.
+            var toast = UI.Image("Toast", safe, Sprites.RoundedSmall, new Color32(8, 44, 58, 235));
+            UI.Pin(toast.rectTransform, new Vector2(0.5f, 1f), new Vector2(0f, -BarHeight - 12f - 18f - 68f - 16f - 32f), new Vector2(700f, 64f));
+            toastText = UI.Text("Text", toast.rectTransform, 32, new Color32(190, 245, 250, 255), TextAnchor.MiddleCenter, FontStyle.Bold);
+            UI.Stretch(toastText.rectTransform);
+            toastGroup = toast.gameObject.AddComponent<CanvasGroup>();
+            toastGroup.blocksRaycasts = false;
+            toastGroup.interactable = false;
+            toast.gameObject.SetActive(false);
         }
 
         Bar BuildBar(RectTransform parent, string label, Color color, float xMin, float xMax)
         {
             var b = new Bar { Color = color };
             var r = UI.Place(UI.Rect(label, parent), new Vector2(xMin, 0f), new Vector2(xMax, 1f), new Vector2(24f, 16f), new Vector2(-24f, -12f));
+            b.Root = r;
 
             var name = UI.Text("Label", r, 26, color, TextAnchor.MiddleLeft, FontStyle.Bold);
             name.text = label;

@@ -33,6 +33,10 @@ namespace DeepStation
         static readonly Color GlassColor = C(10, 50, 70);
         static readonly Color LabelColor = C(206, 220, 232);
         static readonly Color DimLabel = C(130, 150, 168);
+        static readonly Color RepairColor = C(236, 236, 228);
+        static readonly Color SmokeColor = C(150, 152, 158);
+        static readonly Color SparkColor = C(255, 236, 170);
+        static readonly Color ToolColor = C(190, 200, 210);
 
         // Sorting orders, back to front.
         const int OceanOrder = -100, RayOrder = -95, CritterOrder = -90, TetherOrder = -60, SpillOrder = -50,
@@ -56,6 +60,31 @@ namespace DeepStation
             public readonly List<SpriteRenderer> Bubbles = new List<SpriteRenderer>();
             public Vector2 TankBottom;
             public float TankHeight;
+            public Color MeterColor;
+
+            // Breakdown effects (machines only).
+            public Transform Machine;
+            public Vector2 SmokeOrigin;
+            public float SmokeClock;
+            public readonly List<SpriteRenderer> Smoke = new List<SpriteRenderer>();
+            public readonly List<Spark> Sparks = new List<Spark>();
+        }
+
+        class Spark
+        {
+            public SpriteRenderer Renderer;
+            public int Cycle = int.MinValue;
+            public Vector2 Offset, Velocity;
+        }
+
+        class TankView
+        {
+            public EmergencyTank Tank;
+            public SpriteRenderer Fill, Glow;
+            public float FillWidth, FillHeight;
+            public Vector2 Valve;
+            public float Clock;
+            public readonly List<SpriteRenderer> Bubbles = new List<SpriteRenderer>();
         }
 
         class CrewView
@@ -63,7 +92,39 @@ namespace DeepStation
             public CrewMember Crew;
             public Transform Root, Figure, LegFront, LegBack;
             public SpriteRenderer Body, Visor, Selection, Alert;
+            public GameObject Cooldown;
+            public Transform CooldownFill;
             public float Phase;
+
+            // Standing job: a small badge with the job room's symbol.
+            public Transform JobBadge;
+            public SpriteRenderer JobRing;
+            public GameObject GeneratorGlyph, ScrubberGlyph, QuartersGlyph;
+
+            // Fainted: circling stars and a wake-up bar.
+            public GameObject Faint;
+            public Transform[] FaintStars;
+            public Transform WakeBar, WakeFill;
+
+            // Thought bubble: a rounded cloud with two trailing dots, and its text on the label canvas.
+            public Transform Bubble;
+            public SpriteRenderer BubbleBack;
+            public SpriteRenderer[] BubbleDots;
+            public Text BubbleText;
+            public float ThoughtAge, ThoughtLife, BubbleWidth;
+            public string LastThought;
+
+            public Text NameTag;
+        }
+
+        /// <summary>A short burst of sparks and a rising "Fixed!" over a just-repaired machine.</summary>
+        class RepairPopup
+        {
+            public Vector2 Origin;
+            public float Age;
+            public readonly List<SpriteRenderer> Sparks = new List<SpriteRenderer>();
+            public readonly List<Vector2> Velocities = new List<Vector2>();
+            public Text Text;
         }
 
         class Critter
@@ -82,7 +143,16 @@ namespace DeepStation
         Sprite wallGradient;
         readonly List<RoomView> roomViews = new List<RoomView>();
         readonly List<CrewView> crewViews = new List<CrewView>();
+        readonly List<TankView> tankViews = new List<TankView>();
         readonly List<Critter> critters = new List<Critter>();
+        readonly List<RepairPopup> popups = new List<RepairPopup>();
+        readonly System.Random rng = new System.Random();
+        /// <summary>Seconds until the next thought bubble. The first comes early so the crew feel alive at once.</summary>
+        float thoughtTimer = 5f;
+
+        static readonly Color BubbleColor = C(232, 238, 242);
+        static readonly Color BubbleTextColor = C(22, 32, 44);
+        const float ThoughtSeconds = 4.5f;
 
         public CrewMember Selected { get; private set; }
 
@@ -107,11 +177,14 @@ namespace DeepStation
             BuildOcean();
             BuildStation();
             station.Rebuilt += Rebuild;
+            station.RepairFinished += OnRepairFinished;
         }
 
         void OnDestroy()
         {
-            if (station != null) station.Rebuilt -= Rebuild;
+            if (station == null) return;
+            station.Rebuilt -= Rebuild;
+            station.RepairFinished -= OnRepairFinished;
         }
 
         void Rebuild()
@@ -120,6 +193,8 @@ namespace DeepStation
             if (stationRoot != null) Destroy(stationRoot.gameObject);
             roomViews.Clear();
             crewViews.Clear();
+            tankViews.Clear();
+            popups.Clear();
             BuildStation();
         }
 
@@ -128,8 +203,6 @@ namespace DeepStation
         /// <summary>Called by StationCamera for a tap (not a drag) at a world position.</summary>
         public void HandleTap(Vector2 world)
         {
-            if (station.IsLost) return;
-
             CrewView nearest = null;
             float best = 0.65f;
             foreach (var v in crewViews)
@@ -163,9 +236,16 @@ namespace DeepStation
             Selected = null;
         }
 
+        /// <summary>
+        /// Would tapping this room give the selected crew member an order? True for any room
+        /// they aren't in, including their own job while they're resting (pulls them out of bed).
+        /// Tapping the room they're in cycles through its occupants instead.
+        /// </summary>
+        bool IsOrder(Room room) => Selected != null && Selected.Room != room;
+
         void OnRoomTapped(Room room)
         {
-            if (Selected != null && Selected.Room != room)
+            if (IsOrder(room))
             {
                 station.Send(Selected, room);
                 Selected = null;
@@ -188,17 +268,164 @@ namespace DeepStation
         void LateUpdate()
         {
             if (station == null) return;
-            if (station.IsLost) Selected = null;
 
             float t = Time.time;
             float pulse = 0.5f + 0.5f * Mathf.Sin(t * 7f);
 
             foreach (var c in critters) UpdateCritter(c, t);
-            foreach (var v in roomViews) UpdateRoom(v, pulse);
+            foreach (var v in roomViews) UpdateRoom(v, t, pulse);
+            UpdateThoughts(Time.deltaTime);
             foreach (var v in crewViews) UpdateCrew(v, t, pulse);
+            foreach (var v in tankViews) UpdateTank(v, pulse);
+            UpdatePopups(Time.deltaTime);
         }
 
-        void UpdateRoom(RoomView v, float pulse)
+        // ------------------------------------------------------------------ thoughts
+
+        /// <summary>
+        /// One bubble at a time. While something is wrong, thoughts come more often and usually
+        /// hint at it; otherwise it's small talk every half minute or so.
+        /// </summary>
+        void UpdateThoughts(float dt)
+        {
+            foreach (var v in crewViews)
+                if (v.ThoughtLife > 0f) v.ThoughtAge += dt;
+
+            thoughtTimer -= dt;
+            if (thoughtTimer > 0f) return;
+            foreach (var v in crewViews)
+                if (v.ThoughtLife > 0f && v.ThoughtAge < v.ThoughtLife)
+                {
+                    thoughtTimer = 1.5f;
+                    return;
+                }
+
+            var hints = new List<CrewView>();
+            var awake = new List<CrewView>();
+            foreach (var v in crewViews)
+            {
+                if (v.Crew.IsFainted) continue;
+                awake.Add(v);
+                var hint = CrewThoughts.Hint(station, v.Crew);
+                if (hint != null && hint != v.LastThought) hints.Add(v);
+            }
+            if (awake.Count == 0)
+            {
+                thoughtTimer = 3f;
+                return;
+            }
+
+            if (hints.Count > 0 && rng.NextDouble() < 0.75)
+            {
+                var v = hints[rng.Next(hints.Count)];
+                ShowThought(v, CrewThoughts.Hint(station, v.Crew));
+                thoughtTimer = Range(10f, 16f);
+            }
+            else
+            {
+                var v = awake[rng.Next(awake.Count)];
+                ShowThought(v, CrewThoughts.Flavor(v.Crew, rng));
+                thoughtTimer = Range(18f, 30f);
+            }
+        }
+
+        float Range(float min, float max) => min + (float)rng.NextDouble() * (max - min);
+
+        void ShowThought(CrewView v, string text)
+        {
+            v.BubbleText.text = text;
+            v.LastThought = text;
+            v.ThoughtAge = 0f;
+            v.ThoughtLife = ThoughtSeconds;
+            v.BubbleWidth = Mathf.Max(0.5f, v.BubbleText.preferredWidth * LabelScale + 0.3f);
+            v.BubbleBack.size = new Vector2(v.BubbleWidth, 0.4f);
+        }
+
+        void UpdateThoughtBubble(CrewView v, bool lying, bool fainted)
+        {
+            bool showing = v.ThoughtLife > 0f && v.ThoughtAge < v.ThoughtLife && !fainted;
+            v.Bubble.gameObject.SetActive(showing);
+            v.BubbleText.enabled = showing;
+            if (!showing) return;
+
+            // Fade in quickly, hold, fade out.
+            float alpha = Mathf.Clamp01(Mathf.Min(v.ThoughtAge / 0.25f, (v.ThoughtLife - v.ThoughtAge) / 0.5f));
+            float lift = 0.06f * Mathf.Clamp01(v.ThoughtAge / 0.25f);
+            // Keep the cloud on screen for crew standing near the station's outer walls.
+            float edge = StationLayout.ViewWidth * 0.5f - 0.15f - v.BubbleWidth * 0.5f;
+            float centerX = Mathf.Clamp(v.Crew.Position.x + 0.12f, -edge, edge);
+            Vector2 offset = new Vector2(centerX - v.Crew.Position.x, (lying ? 1.5f : 1.9f) + lift);
+            v.Bubble.localPosition = new Vector3(0f, offset.y - 1.9f, 0f);
+            v.BubbleBack.transform.localPosition = new Vector3(offset.x, 1.9f, 0f);
+            v.BubbleBack.color = WithAlpha(BubbleColor, 0.95f * alpha);
+            foreach (var dot in v.BubbleDots) dot.color = WithAlpha(BubbleColor, 0.9f * alpha);
+            v.BubbleText.color = WithAlpha(BubbleTextColor, alpha);
+            v.BubbleText.rectTransform.anchoredPosition = (v.Crew.Position + offset) / LabelScale;
+        }
+
+        // ------------------------------------------------------------------ rewards
+
+        void OnRepairFinished(Room room)
+        {
+            RoomView view = null;
+            foreach (var v in roomViews) if (v.Room == room) view = v;
+            if (view == null) return;
+
+            var popup = new RepairPopup { Origin = view.SmokeOrigin };
+            for (int i = 0; i < 12; i++)
+            {
+                float angle = i / 12f * Mathf.PI * 2f + Range(-0.2f, 0.2f);
+                popup.Velocities.Add(new Vector2(Mathf.Cos(angle), Mathf.Sin(angle) * 0.8f + 0.3f) * Range(0.6f, 1f));
+                popup.Sparks.Add(Shape(stationRoot, "Sparkle", Sprites.Circle, i % 2 == 0 ? SparkColor : Teal, popup.Origin,
+                    new Vector2(0.09f, 0.09f), MeterOrder + 2));
+            }
+            popup.Text = Label("Fixed", popup.Origin, new Vector2(2f, 0.4f), 26, SparkColor, TextAnchor.MiddleCenter, FontStyle.Bold);
+            popup.Text.text = "Fixed!";
+            popup.Text.gameObject.AddComponent<Outline>().effectColor = new Color(0f, 0f, 0f, 0.6f);
+            popups.Add(popup);
+
+            // Whoever did the work is pleased with it.
+            foreach (var v in crewViews)
+                if (v.Crew.Room == room && v.Crew.RepairedRoom == room && v.Crew.RepairCooldown > 0f && !v.Crew.IsFainted)
+                {
+                    ShowThought(v, CrewThoughts.Repaired(rng));
+                    thoughtTimer = Mathf.Max(thoughtTimer, 6f);
+                    break;
+                }
+        }
+
+        void UpdatePopups(float dt)
+        {
+            const float life = 1.6f;
+            for (int i = popups.Count - 1; i >= 0; i--)
+            {
+                var p = popups[i];
+                p.Age += dt;
+                if (p.Age >= life)
+                {
+                    foreach (var s in p.Sparks) Destroy(s.gameObject);
+                    Destroy(p.Text.gameObject);
+                    popups.RemoveAt(i);
+                    continue;
+                }
+
+                // Sparks fly out fast and slow down; the text floats up and fades in the second half.
+                float burst = 1f - Mathf.Pow(1f - Mathf.Clamp01(p.Age / 0.7f), 3f);
+                float fade = 1f - Mathf.Clamp01(p.Age / 0.9f);
+                for (int k = 0; k < p.Sparks.Count; k++)
+                {
+                    p.Sparks[k].transform.position = p.Origin + p.Velocities[k] * burst;
+                    p.Sparks[k].color = WithAlpha(p.Sparks[k].color, fade);
+                    float size = 0.09f * (1f - 0.5f * burst);
+                    p.Sparks[k].transform.localScale = new Vector3(size, size, 1f);
+                }
+                float textAlpha = 1f - Mathf.Clamp01((p.Age - life * 0.5f) / (life * 0.5f));
+                p.Text.rectTransform.anchoredPosition = (p.Origin + new Vector2(0f, 0.5f + 0.5f * p.Age / life)) / LabelScale;
+                p.Text.color = WithAlpha(SparkColor, textAlpha);
+            }
+        }
+
+        void UpdateRoom(RoomView v, float time, float pulse)
         {
             var room = v.Room;
             float dt = Time.deltaTime;
@@ -209,11 +436,13 @@ namespace DeepStation
             if (failing) v.Alarm.color = WithAlpha(WarningRed, 0.3f + 0.7f * pulse);
             else if (warning) v.Alarm.color = WithAlpha(Caution, 0.75f);
 
-            v.Target.enabled = Selected != null && Selected.Room != room;
+            v.Target.enabled = IsOrder(room);
             if (v.Target.enabled) v.Target.color = WithAlpha(Color.white, 0.2f + 0.35f * pulse);
 
+            // While broken the meter tracks repair progress instead of output.
             float fill = Mathf.Clamp01(room.Meter);
             v.MeterFill.enabled = fill > 0.001f;
+            v.MeterFill.color = WithAlpha(room.Broken ? RepairColor : v.MeterColor, 0.85f);
             var scale = v.MeterFill.transform.localScale;
             v.MeterFill.transform.localScale = new Vector3(v.MeterWidth * fill, scale.y, 1f);
 
@@ -223,22 +452,100 @@ namespace DeepStation
 
             if (v.Rotor != null)
             {
-                v.RotorAngle -= 600f * room.Meter * dt;
+                v.RotorAngle -= 600f * room.Activity * dt;
                 v.Rotor.localRotation = Quaternion.Euler(0f, 0f, v.RotorAngle);
-                v.Lamp.color = failing ? WithAlpha(WarningRed, 0.4f + 0.6f * pulse)
-                    : room.Meter > 0f ? PowerColor : C(70, 56, 40);
+                v.Lamp.color = failing || room.Broken ? WithAlpha(WarningRed, 0.4f + 0.6f * pulse)
+                    : room.Rattling ? WithAlpha(Caution, 0.5f + 0.5f * pulse)
+                    : room.Activity > 0f ? PowerColor : C(70, 56, 40);
             }
 
             if (v.Bubbles.Count > 0)
             {
-                v.BubbleClock += dt * (0.15f + 0.9f * room.Meter);
+                v.BubbleClock += dt * (0.15f + 0.9f * room.Activity);
                 for (int i = 0; i < v.Bubbles.Count; i++)
                 {
                     float p = Mathf.Repeat(v.BubbleClock + i / (float)v.Bubbles.Count, 1f);
                     float wobble = Mathf.Sin((v.BubbleClock + i) * 9f) * 0.08f;
                     v.Bubbles[i].transform.position = v.TankBottom + new Vector2(wobble + (i % 3 - 1) * 0.12f, p * v.TankHeight);
-                    v.Bubbles[i].color = WithAlpha(C(210, 250, 255), room.Meter > 0.01f ? 0.85f * Mathf.Sin(p * Mathf.PI) : 0f);
+                    v.Bubbles[i].color = WithAlpha(C(210, 250, 255), room.Activity > 0.01f ? 0.85f * Mathf.Sin(p * Mathf.PI) : 0f);
                 }
+            }
+
+            if (v.Machine != null) UpdateBreakdownEffects(v, time, dt);
+        }
+
+        /// <summary>Rattling machines shake and puff a little smoke; broken ones smoke and spark.</summary>
+        void UpdateBreakdownEffects(RoomView v, float time, float dt)
+        {
+            var room = v.Room;
+            bool repairing = room.Broken && room.Repairers > 0;
+
+            float shake = room.Rattling ? 0.035f : repairing ? 0.012f : 0f;
+            v.Machine.localPosition = shake > 0f
+                ? new Vector3(Mathf.Sin(time * 53f) * shake, Mathf.Sin(time * 41f + 1f) * shake * 0.6f, 0f)
+                : Vector3.zero;
+
+            float smoke = room.Broken ? (repairing ? 0.6f : 1f) : room.Rattling ? 0.45f : 0f;
+            v.SmokeClock += dt * 0.45f;
+            for (int i = 0; i < v.Smoke.Count; i++)
+            {
+                var puff = v.Smoke[i];
+                float p = Mathf.Repeat(v.SmokeClock + i / (float)v.Smoke.Count, 1f);
+                float drift = Mathf.Sin((v.SmokeClock + i) * 3f) * 0.12f + (i % 2 == 0 ? -0.18f : 0.18f) * p;
+                puff.transform.position = v.SmokeOrigin + new Vector2(drift, p * 0.85f);
+                float size = 0.16f + 0.34f * p;
+                puff.transform.localScale = new Vector3(size, size, 1f);
+                puff.color = WithAlpha(SmokeColor, smoke * 0.5f * Mathf.Sin(p * Mathf.PI));
+            }
+
+            // Sparks: short-lived bright dots that jump out of the machine. Busier while being repaired.
+            float rate = repairing ? 3.2f : room.Broken ? 1.1f : 0f;
+            for (int i = 0; i < v.Sparks.Count; i++)
+            {
+                var spark = v.Sparks[i];
+                if (rate <= 0f)
+                {
+                    spark.Renderer.enabled = false;
+                    continue;
+                }
+                float phase = time * rate + i * 0.37f;
+                int cycle = Mathf.FloorToInt(phase);
+                float life = (phase - cycle) / 0.3f;
+                if (cycle != spark.Cycle)
+                {
+                    spark.Cycle = cycle;
+                    spark.Offset = new Vector2(Random.Range(-0.4f, 0.4f), Random.Range(-0.3f, 0.1f));
+                    spark.Velocity = new Vector2(Random.Range(-0.5f, 0.5f), Random.Range(0.2f, 0.7f));
+                }
+                spark.Renderer.enabled = life < 1f;
+                if (life >= 1f) continue;
+                spark.Renderer.transform.position = v.SmokeOrigin + spark.Offset + spark.Velocity * life * 0.3f
+                    + new Vector2(0f, -0.4f * life * life * 0.3f);
+                spark.Renderer.color = WithAlpha(SparkColor, 1f - life);
+            }
+        }
+
+        void UpdateTank(TankView v, float pulse)
+        {
+            var tank = v.Tank;
+            bool venting = station.VentingTank == tank;
+            bool refilling = station.RefillingTank == tank;
+
+            v.Fill.enabled = tank.Fill > 0.01f;
+            v.Fill.transform.localScale = new Vector3(v.FillWidth, v.FillHeight * Mathf.Clamp01(tank.Fill), 1f);
+            v.Fill.color = venting ? Color.Lerp(Teal, Color.white, 0.4f * pulse)
+                : WithAlpha(Teal, tank.IsFull ? 0.9f : 0.55f);
+
+            float slow = 0.5f + 0.5f * Mathf.Sin(Time.time * 2f);
+            v.Glow.color = WithAlpha(Teal, venting ? 0.35f + 0.35f * pulse : refilling ? 0.08f + 0.1f * slow : 0f);
+
+            v.Clock += Time.deltaTime * 1.6f;
+            for (int i = 0; i < v.Bubbles.Count; i++)
+            {
+                float p = Mathf.Repeat(v.Clock + i / (float)v.Bubbles.Count, 1f);
+                float wobble = Mathf.Sin((v.Clock + i) * 8f) * 0.06f;
+                v.Bubbles[i].transform.position = v.Valve + new Vector2(wobble, p * 0.55f);
+                v.Bubbles[i].color = WithAlpha(C(210, 250, 255), venting ? 0.9f * Mathf.Sin(p * Mathf.PI) : 0f);
             }
         }
 
@@ -254,8 +561,24 @@ namespace DeepStation
             float legSwing = 0f;
             float breathe = 1f;
             bool showVisor = true;
+            // Fainted crew lie where they dropped: on the bunk if resting, on the floor otherwise.
+            bool fainted = crew.IsFainted;
+            bool faintedInBed = fainted && crew.IsResting;
+            // Off duty and fully rested: up out of bed, idling beside it.
+            bool offDutyUp = crew.IsResting && !fainted && crew.Job == crew.Room && crew.Stamina >= Station.MaxStamina - 0.01f;
+            // At a machine but nothing to do: broken and waiting, or a scrubber with no power.
+            bool stalled = crew.Room.Type == RoomType.Scrubber && station.PowerSupply < 0.02f;
+            bool lying = fainted || (crew.IsResting && !offDutyUp);
 
-            if (crew.IsMoving && crew.Climbing)
+            if (fainted)
+            {
+                facing = 1f;
+                rotation = 90f;
+                figurePos = new Vector3(0.5f, faintedInBed ? 0.58f : 0.2f, 0f);
+                breathe = 1f + 0.02f * Mathf.Sin(t * 1.2f);
+                showVisor = false;
+            }
+            else if (crew.IsMoving && crew.Climbing)
             {
                 // Back to the camera, hand over hand.
                 showVisor = false;
@@ -267,6 +590,10 @@ namespace DeepStation
                 legSwing = Mathf.Sin(t * 12f) * 30f;
                 figurePos.y = Mathf.Abs(Mathf.Sin(t * 12f)) * 0.05f;
             }
+            else if (offDutyUp)
+            {
+                Idle(t, ref facing, ref figurePos, ref breathe, ref legSwing);
+            }
             else if (crew.IsResting)
             {
                 // Lying on the bunk, head on the pillow.
@@ -274,6 +601,20 @@ namespace DeepStation
                 rotation = 90f;
                 figurePos = new Vector3(0.5f, 0.58f, 0f);
                 breathe = 1f + 0.035f * Mathf.Sin(t * 2f);
+            }
+            else if (crew.IsRepairing)
+            {
+                // Repairing: quick, hard hammering at the machine.
+                float speed = crew.IsExhausted ? 7f : 14f;
+                float hit = Mathf.Abs(Mathf.Sin(t * speed));
+                figurePos.y = hit * 0.025f;
+                rotation = -facing * (8f + 10f * hit);
+                legSwing = Mathf.Sin(t * speed) * 3f;
+            }
+            else if (crew.Room.Broken || stalled)
+            {
+                // Waiting by a broken machine for their repair cooldown, or for power.
+                Idle(t, ref facing, ref figurePos, ref breathe, ref legSwing);
             }
             else
             {
@@ -300,12 +641,80 @@ namespace DeepStation
                 v.Selection.transform.localScale = new Vector3(1.05f + 0.1f * pulse, 0.34f + 0.03f * pulse, 1f);
             }
 
+            // The cooldown only matters at a machine, so the wrench shows in the room they just
+            // fixed or at a broken machine they're waiting to repair, not everywhere they go.
+            bool cooling = crew.RepairCooldown > 0f && !crew.IsMoving && !fainted
+                && (crew.Room == crew.RepairedRoom || crew.Room.Broken);
+            v.Cooldown.SetActive(cooling);
+            if (cooling)
+            {
+                float left = Mathf.Clamp01(crew.RepairCooldown / Mathf.Max(0.01f, station.tuning.repairCooldown));
+                v.CooldownFill.localScale = new Vector3(0.4f * left, v.CooldownFill.localScale.y, 1f);
+            }
+
             bool tired = crew.Stamina < station.tuning.tiredStamina;
-            bool showAlert = tired && !crew.IsMoving && !crew.IsResting;
+            bool showAlert = tired && !crew.IsMoving && !crew.IsResting && !fainted;
             v.Alert.enabled = showAlert;
             if (showAlert)
                 v.Alert.color = crew.IsExhausted ? WithAlpha(WarningRed, 0.4f + 0.6f * pulse) : Caution;
+
+            // Fainted: little stars circle the head and a bar fills as they come round.
+            v.Faint.SetActive(fainted);
+            if (fainted)
+            {
+                Vector2 head = new Vector2(-0.38f, faintedInBed ? 0.6f : 0.22f);
+                for (int i = 0; i < v.FaintStars.Length; i++)
+                {
+                    float a = time * 2.6f + i * Mathf.PI * 2f / v.FaintStars.Length;
+                    v.FaintStars[i].localPosition = head + new Vector2(Mathf.Cos(a) * 0.17f, 0.3f + Mathf.Sin(a) * 0.05f);
+                }
+                float awake = 1f - Mathf.Clamp01(crew.FaintTime / Mathf.Max(0.01f, station.tuning.faintSeconds));
+                v.WakeBar.localPosition = new Vector3(0.05f, faintedInBed ? 1.08f : 0.72f, 0f);
+                v.WakeFill.localScale = new Vector3(0.4f * awake, v.WakeFill.localScale.y, 1f);
+            }
+
+            // Job badge: shown unless fainted, so a resting crew member still says where they'll go back to.
+            v.JobBadge.gameObject.SetActive(!fainted);
+            var job = crew.Job.Type;
+            v.GeneratorGlyph.SetActive(job == RoomType.Generator);
+            v.ScrubberGlyph.SetActive(job == RoomType.Scrubber);
+            v.QuartersGlyph.SetActive(job == RoomType.Quarters);
+            v.JobRing.color = JobColor(job);
+            // Over the lying body while resting, over the helmet otherwise.
+            v.JobBadge.localPosition = lying ? new Vector3(0.05f, 1.02f, 0f) : new Vector3(0f, 1.4f, 0f);
+
+            UpdateThoughtBubble(v, lying, fainted);
+
+            v.NameTag.enabled = selected;
+            if (selected) v.NameTag.rectTransform.anchoredPosition = (crew.Position + new Vector2(0f, -0.26f)) / LabelScale;
         }
+
+        /// <summary>
+        /// Not working: stand and breathe, tap a foot, glance the other way, stretch. A 7 s loop,
+        /// offset per crew member so they don't move in sync.
+        /// </summary>
+        static void Idle(float t, ref float facing, ref Vector3 figurePos, ref float breathe, ref float legSwing)
+        {
+            float cycle = Mathf.Repeat(t, 7f);
+            breathe = 1f + 0.02f * Mathf.Sin(t * 2.2f);
+            if (cycle < 2.4f)
+            {
+                legSwing = Mathf.Max(0f, Mathf.Sin(t * 7f)) * 8f;
+            }
+            else if (cycle < 4.2f)
+            {
+                facing = -facing;
+            }
+            else if (cycle > 5f && cycle < 6.3f)
+            {
+                float s = Mathf.Sin((cycle - 5f) / 1.3f * Mathf.PI);
+                breathe += 0.09f * s;
+                figurePos.y = 0.04f * s;
+            }
+        }
+
+        static Color JobColor(RoomType type) =>
+            type == RoomType.Generator ? PowerColor : type == RoomType.Scrubber ? Teal : RestColor;
 
         void UpdateCritter(Critter c, float t)
         {
@@ -461,10 +870,49 @@ namespace DeepStation
                     new Vector2(StationLayout.ShaftWidth, StationLayout.SlabHeight), SlabOrder);
             }
 
+            BuildTanks(floorOfStation - 0.12f);
+
             foreach (var room in station.Rooms)
                 roomViews.Add(BuildRoom(room));
             foreach (var crew in station.Crew)
                 crewViews.Add(BuildCrew(crew));
+        }
+
+        /// <summary>A rack of emergency oxygen canisters hanging under the bottom of the station.</summary>
+        void BuildTanks(float stationBottom)
+        {
+            int count = station.Tanks.Count;
+            if (count == 0) return;
+
+            const float spacing = 0.46f, height = 0.8f;
+            float top = stationBottom - 0.14f;
+            float cy = top - height * 0.5f;
+            var g = Group(stationRoot, "Emergency Tanks", Vector2.zero);
+            Shape(g, "Rack", Sprites.Pixel, HullDark, new Vector2(StationLayout.LadderX, stationBottom - 0.06f),
+                new Vector2(count * spacing + 0.2f, 0.12f), HullOrder);
+
+            for (int i = 0; i < count; i++)
+            {
+                float x = StationLayout.LadderX + (i - (count - 1) * 0.5f) * spacing;
+                var v = new TankView { Tank = station.Tanks[i], FillWidth = 0.2f, FillHeight = height - 0.18f };
+                v.Glow = Shape(g, "Glow", Sprites.Glow, Color.clear, new Vector2(x, cy), new Vector2(1.1f, 1.6f), SpillOrder);
+                Shape(g, "Hanger", Sprites.Pixel, HullDark, new Vector2(x, top + 0.04f), new Vector2(0.06f, 0.12f), HullOrder);
+                Shape(g, "Shell", Sprites.WorldRoundedSmall, C(36, 70, 84), new Vector2(x, cy), new Vector2(0.34f, height), MachineOrder);
+                Shape(g, "Inside", Sprites.WorldRoundedSmall, C(8, 22, 30), new Vector2(x, cy), new Vector2(0.24f, height - 0.14f), MachineOrder + 1);
+                v.Fill = Shape(g, "Fill", Sprites.PixelBottom, Teal, new Vector2(x, cy - v.FillHeight * 0.5f),
+                    new Vector2(v.FillWidth, v.FillHeight), MachineOrder + 2);
+                Shape(g, "Strap", Sprites.Pixel, HullDark, new Vector2(x, top - 0.2f), new Vector2(0.38f, 0.05f), MachineOrder + 3);
+                Shape(g, "Strap", Sprites.Pixel, HullDark, new Vector2(x, top - height + 0.2f), new Vector2(0.38f, 0.05f), MachineOrder + 3);
+                v.Valve = new Vector2(x + 0.1f, top - 0.06f);
+                Shape(g, "Valve", Sprites.Circle, C(104, 116, 126), v.Valve, new Vector2(0.1f, 0.1f), MachineOrder + 3);
+                for (int k = 0; k < 4; k++)
+                    v.Bubbles.Add(Shape(g, "Bubble", Sprites.Circle, Color.clear, v.Valve, new Vector2(0.08f, 0.08f), MachineOrder + 4));
+                tankViews.Add(v);
+            }
+
+            var label = Label("Tank Label", new Vector2(StationLayout.LadderX, top - height - 0.24f), new Vector2(3f, 0.3f),
+                19, DimLabel, TextAnchor.MiddleCenter, FontStyle.Bold);
+            label.text = "EMERGENCY O2";
         }
 
         void BuildLabelCanvas()
@@ -529,16 +977,33 @@ namespace DeepStation
             {
                 case RoomType.Generator:
                     meterColor = PowerColor;
-                    BuildGenerator(v, g, c.x, floorY);
+                    v.Machine = Group(g, "Machine", Vector2.zero);
+                    BuildGenerator(v, v.Machine, c.x, floorY);
+                    v.SmokeOrigin = new Vector2(c.x, floorY + 1.3f);
                     break;
                 case RoomType.Scrubber:
                     meterColor = Teal;
-                    BuildScrubber(v, g, c.x, floorY, b.yMax);
+                    v.Machine = Group(g, "Machine", Vector2.zero);
+                    BuildScrubber(v, v.Machine, c.x, floorY, b.yMax);
+                    v.SmokeOrigin = new Vector2(c.x, floorY + 1.45f);
                     break;
                 default:
                     meterColor = RestColor;
                     BuildQuarters(room, g, c.x, floorY);
                     break;
+            }
+            v.MeterColor = meterColor;
+
+            if (v.Machine != null)
+            {
+                for (int i = 0; i < 6; i++)
+                    v.Smoke.Add(Shape(g, "Smoke", Sprites.Circle, Color.clear, v.SmokeOrigin, new Vector2(0.2f, 0.2f), MachineOrder + 5));
+                for (int i = 0; i < 5; i++)
+                {
+                    var spark = Shape(g, "Spark", Sprites.Circle, SparkColor, v.SmokeOrigin, new Vector2(0.07f, 0.07f), MachineOrder + 6);
+                    spark.enabled = false;
+                    v.Sparks.Add(new Spark { Renderer = spark });
+                }
             }
 
             v.Target = Shape(g, "Target Outline", Sprites.WorldOutline, Color.white, c, new Vector2(w + 0.46f, h + 0.46f), TargetOrder);
@@ -619,9 +1084,92 @@ namespace DeepStation
             Shape(v.Figure, "Helmet", Sprites.Circle, C(228, 236, 242), new Vector2(0.02f, 0.88f), new Vector2(0.36f, 0.36f), CrewOrder + 4);
             v.Visor = Shape(v.Figure, "Visor", Sprites.WorldRoundedSmall, C(24, 72, 94), new Vector2(0.09f, 0.89f), new Vector2(0.2f, 0.14f), CrewOrder + 5);
 
-            v.Alert = Shape(v.Root, "Tired", Sprites.Circle, Caution, new Vector2(0f, 1.3f), new Vector2(0.2f, 0.2f), CrewOrder + 6);
+            v.Alert = Shape(v.Root, "Tired", Sprites.Circle, Caution, new Vector2(0.27f, 1.4f), new Vector2(0.16f, 0.16f), CrewOrder + 6);
             v.Alert.enabled = false;
+
+            BuildJobBadge(v);
+            BuildFaint(v);
+            BuildThoughtBubble(v);
+
+            v.NameTag = Label("Name Tag", crew.Position, new Vector2(1.6f, 0.3f), 20, LabelColor, TextAnchor.MiddleCenter, FontStyle.Bold);
+            v.NameTag.text = crew.Name;
+            v.NameTag.gameObject.AddComponent<Outline>().effectColor = new Color(0f, 0f, 0f, 0.8f);
+            v.NameTag.enabled = false;
+
+            // Repair cooldown: a little wrench and a bar that empties.
+            var cooldown = Group(v.Root, "Repair Cooldown", new Vector2(0f, 1.16f));
+            Shape(cooldown, "Wrench Handle", Sprites.Pixel, ToolColor, new Vector2(-0.27f, -0.02f), new Vector2(0.05f, 0.2f), CrewOrder + 6, 45f);
+            Shape(cooldown, "Wrench Head", Sprites.Circle, ToolColor, new Vector2(-0.34f, 0.05f), new Vector2(0.13f, 0.13f), CrewOrder + 6);
+            Shape(cooldown, "Wrench Jaw", Sprites.Pixel, C(4, 10, 18), new Vector2(-0.37f, 0.08f), new Vector2(0.05f, 0.08f), CrewOrder + 7, 45f);
+            Shape(cooldown, "Track", Sprites.Pixel, C(4, 10, 18, 220), new Vector2(0.04f, 0f), new Vector2(0.42f, 0.08f), CrewOrder + 6);
+            v.CooldownFill = Shape(cooldown, "Fill", Sprites.PixelLeft, ToolColor, new Vector2(-0.16f, 0f), new Vector2(0.4f, 0.05f), CrewOrder + 7).transform;
+            v.Cooldown = cooldown.gameObject;
+            v.Cooldown.SetActive(false);
             return v;
+        }
+
+        /// <summary>A pale cloud above the head with two small dots trailing down to it, like a comic thought.</summary>
+        void BuildThoughtBubble(CrewView v)
+        {
+            const int order = MeterOrder + 2;
+            v.Bubble = Group(v.Root, "Thought", Vector2.zero);
+            v.BubbleBack = Shape(v.Bubble, "Cloud", Sprites.WorldRounded, BubbleColor, new Vector2(0.12f, 1.9f), new Vector2(1f, 0.4f), order);
+            v.BubbleDots = new[]
+            {
+                Shape(v.Bubble, "Dot", Sprites.Circle, BubbleColor, new Vector2(0.06f, 1.62f), new Vector2(0.1f, 0.1f), order),
+                Shape(v.Bubble, "Dot", Sprites.Circle, BubbleColor, new Vector2(0.02f, 1.5f), new Vector2(0.06f, 0.06f), order),
+            };
+            v.Bubble.gameObject.SetActive(false);
+
+            v.BubbleText = Label("Thought", Vector2.zero, new Vector2(4f, 0.3f), 20, BubbleTextColor, TextAnchor.MiddleCenter, FontStyle.Bold);
+            v.BubbleText.enabled = false;
+        }
+
+        /// <summary>Circling stars over the head, and a bar that fills as a fainted crew member comes round.</summary>
+        void BuildFaint(CrewView v)
+        {
+            const int order = CrewOrder + 6;
+            var faint = Group(v.Root, "Fainted", Vector2.zero);
+            v.FaintStars = new Transform[3];
+            for (int i = 0; i < v.FaintStars.Length; i++)
+                v.FaintStars[i] = Shape(faint, "Star", Sprites.Circle, SparkColor, Vector2.zero, new Vector2(0.08f, 0.08f), order).transform;
+
+            v.WakeBar = Group(faint, "Wake Bar", Vector2.zero);
+            Shape(v.WakeBar, "Track", Sprites.Pixel, C(4, 10, 18, 220), Vector2.zero, new Vector2(0.44f, 0.08f), order);
+            v.WakeFill = Shape(v.WakeBar, "Fill", Sprites.PixelLeft, RestColor, new Vector2(-0.2f, 0f), new Vector2(0.4f, 0.05f), order + 1).transform;
+            v.Faint = faint.gameObject;
+            v.Faint.SetActive(false);
+        }
+
+        /// <summary>
+        /// A small dark disc with a coloured rim and the job room's symbol, echoing the room's own
+        /// machine: generator rotor, scrubber bubbles, a moon for Quarters.
+        /// </summary>
+        void BuildJobBadge(CrewView v)
+        {
+            const int order = CrewOrder + 6;
+            var badge = Group(v.Root, "Job Badge", new Vector2(0f, 1.4f));
+            v.JobBadge = badge;
+            v.JobRing = Shape(badge, "Rim", Sprites.Circle, Color.white, Vector2.zero, new Vector2(0.32f, 0.32f), order);
+            var back = C(8, 16, 26);
+            Shape(badge, "Back", Sprites.Circle, back, Vector2.zero, new Vector2(0.26f, 0.26f), order + 1);
+
+            var gen = Group(badge, "Generator", Vector2.zero);
+            Shape(gen, "Blade", Sprites.Pixel, PowerColor, Vector2.zero, new Vector2(0.18f, 0.045f), order + 2, 45f);
+            Shape(gen, "Blade", Sprites.Pixel, PowerColor, Vector2.zero, new Vector2(0.18f, 0.045f), order + 2, -45f);
+            Shape(gen, "Hub", Sprites.Circle, C(64, 64, 70), Vector2.zero, new Vector2(0.06f, 0.06f), order + 3);
+            v.GeneratorGlyph = gen.gameObject;
+
+            var scrub = Group(badge, "Scrubber", Vector2.zero);
+            Shape(scrub, "Bubble", Sprites.Circle, Teal, new Vector2(-0.04f, -0.04f), new Vector2(0.09f, 0.09f), order + 2);
+            Shape(scrub, "Bubble", Sprites.Circle, Teal, new Vector2(0.05f, 0.01f), new Vector2(0.065f, 0.065f), order + 2);
+            Shape(scrub, "Bubble", Sprites.Circle, Teal, new Vector2(-0.01f, 0.07f), new Vector2(0.05f, 0.05f), order + 2);
+            v.ScrubberGlyph = scrub.gameObject;
+
+            var rest = Group(badge, "Quarters", Vector2.zero);
+            Shape(rest, "Moon", Sprites.Circle, RestColor, new Vector2(-0.01f, 0f), new Vector2(0.15f, 0.15f), order + 2);
+            Shape(rest, "Shadow", Sprites.Circle, back, new Vector2(0.04f, 0.035f), new Vector2(0.13f, 0.13f), order + 3);
+            v.QuartersGlyph = rest.gameObject;
         }
     }
 }
