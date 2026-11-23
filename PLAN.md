@@ -2,41 +2,9 @@
 
 **Core idea:** Expand a research station downward, room by room. Three resources (oxygen, power, heat), visible failures, and slow fallbacks so one mistake never snowballs.
 
-**Current status:** Phases 1, 2, the casual pass, and the first part of Phase 3 (crew-operated building/digging, 2-crew repairs, and floor-by-floor depth hazards) are built as version 0.2.0 (code 2). Heat as the 3rd resource and playtesting Phase 3 are next.
+**Current status:** Phases 1 and 2 are built and playtested (removed from this file; see `git log -p PLAN.md`). The casual pass and the first part of Phase 3 (crew-operated building/digging, 2-crew repairs, and floor-by-floor depth hazards) are built as version 0.2.0 (code 2) and awaiting playtest. Heat as the 3rd resource and playtesting Phase 3 are next.
 
-## Phase 1: Prototype (the fun test) ✅ built, playtested
-
-- Unity, portrait mode, tested on a phone along the way
-- A grid of rooms with 3 types: Living Quarters, Scrubber (oxygen), Generator (power)
-- 3 crew you tap to assign to rooms
-- Oxygen and power tick up and down; a red warning shows which room is failing
-- **Goal:** is keeping the station balanced fun for 5 minutes?
-
-What was built (side-on cutaway version):
-
-- Side-on cutaway of the station in dark teal water, with drifting bioluminescent critters. Drag to scroll up and down.
-- 3 rooms on 2 floors linked by a ladder shaft: Living Quarters and Oxygen Scrubber on top, Generator below. Each room holds 2 crew.
-- Crew walk along the floors and climb the ladder. They lean into the machines while working and lie in the bunks while resting.
-- Each room shows a meter and its live rate above it, and flashes a red outline when it's failing.
-- Stamina drains while working and refills in Quarters, so the 3 crew have to rotate. Exhausted crew keep working at half speed instead of stopping.
-- Running out of oxygen starts a 20 s countdown, so you can still recover. If it runs out, a new dive starts automatically. There are no menus.
-
-## Phase 2: Failure and recovery ✅ built, playtested
-
-- Breakdowns on a timer, each with a clear red indicator
-- Emergency tanks buy time instead of instant death
-- Crew can repair rooms, with a short cooldown
-- **Goal:** a mistake costs you something but never ends the run
-
-What was built:
-
-- The Generator and Scrubber wear only while running and break after 60–100 s of running time. For 10 s beforehand they rattle, shake and smoke (amber **RATTLING**), so no breakdown comes without warning.
-- A broken machine stops, smokes and sparks, and flashes red when nobody is on the way to fix it. It turns amber once crew are repairing it or walking over.
-- Crew in a broken room repair it on their own: about 8 s alone, 4 s with two. They hammer at the machine, and the room meter shows repair progress. Repairs drain stamina faster than work.
-- After a repair, that crew member has a 12 s cooldown before they can repair again (wrench and bar above their head).
-- Two emergency O2 tanks hang under the station, also shown as pips in the top bar. When oxygen hits 0, the fullest one vents (+40 O2 over 8 s) before the suffocation countdown can start. Tanks slowly refill from spare air while oxygen is above 90%, so the cost of running dry is a used tank, not the run.
-
-## Casual pass (between Phases 2 and 3)
+## Casual pass (between Phases 2 and 3 — built, awaiting playtest)
 
 The loop worked but was too stressful: constantly rotating crew to keep two meters up is plate-spinning. This pass makes the game handle the boring upkeep so the player only makes interesting choices. It changes behavior, not visuals, and adds no new floors, hazards or resources.
 
