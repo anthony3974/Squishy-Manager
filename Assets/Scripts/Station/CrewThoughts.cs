@@ -33,11 +33,16 @@ namespace DeepStation
             var room = crew.Room;
             if (station.SuffocationTime > 0f) return "can't… breathe…";
             if (station.VentingTank != null) return "emergency air? not good";
+            if (!crew.IsMoving && room.Hazard == RoomHazard.PressureLeak) return "water's coming in!";
+            if (!crew.IsMoving && room.Hazard == RoomHazard.HeatVent) return "it's roasting in here!";
+            if (!crew.IsMoving && room.Hazard == RoomHazard.Creature) return "something's at the window…";
             if (!crew.IsMoving && room.Broken && !crew.IsRepairing && crew.RepairCooldown > 0f) return "need a sec before I fix it again";
+            if (!crew.IsMoving && room.Broken && !crew.IsRepairing) return "need a second pair of hands!";
             if (!crew.IsMoving && room.Rattling) return "that rattle doesn't sound good";
             if (station.PowerSupply < 0.98f) return "why are the lights flickering?";
             if (station.OxygenLow) return "air feels thin…";
             if (crew.WaitingForBed) return "beds are full… so sleepy";
+            if (crew.IsBuilding) return "almost built…";
             if (crew.KeepWorking && !crew.IsResting) return "pushing through!";
             if (station.PowerLow) return "power's running low";
             if (!crew.IsResting && crew.Stamina < station.tuning.tiredStamina) return "need coffee. now.";

@@ -27,9 +27,9 @@ namespace DeepStation
 
         [Header("Pacing: breakdowns")]
         [Tooltip("Shortest running time (seconds) before a Generator or Scrubber breaks. Machines only wear while crew work them. Applies from the next repair. [60]")]
-        public float breakdownMinSeconds = 150f;
+        public float breakdownMinSeconds = 85f;
         [Tooltip("Longest running time (seconds) before a Generator or Scrubber breaks. [100]")]
-        public float breakdownMaxSeconds = 250f;
+        public float breakdownMaxSeconds = 145f;
 
         [Header("Pacing: production")]
         [Tooltip("Power per second for each crew member working the Generator. [3]")]
@@ -77,15 +77,47 @@ namespace DeepStation
         [Tooltip("Rest speed multiplier in Quarters when there is no power.")]
         [Range(0f, 1f)] public float unpoweredRestFactor = 0.5f;
 
+        [Header("Building")]
+        [Tooltip("Power paid up front to build a room in an empty spot.")]
+        public float roomPowerCost = 30f;
+        [Tooltip("Extra power to dig out a new floor, on top of the room cost.")]
+        public float newFloorPowerCost = 20f;
+        [Tooltip("Seconds for one rested crew member to build a room. Two crew take half as long; Tinkerer builds faster.")]
+        public float buildSeconds = 30f;
+
         [Header("Breakdowns")]
         [Tooltip("Seconds of warning before a breakdown: the machine rattles and smokes.")]
         public float rattleSeconds = 10f;
+        [Tooltip("Crew required in a broken room at the same time to repair it.")]
+        [Range(1, 2)] public int repairCrewRequired = 2;
         [Tooltip("Seconds for one rested crew member to repair a machine. Two crew take half as long; exhausted crew work at half speed.")]
         public float repairSeconds = 8f;
         [Tooltip("Stamina drain while repairing, as a multiple of the normal work drain.")]
         public float repairStaminaFactor = 1.25f;
         [Tooltip("Seconds after finishing a repair before that crew member can repair again.")]
         public float repairCooldown = 12f;
+
+        [Header("Depth hazards")]
+        [Tooltip("Shortest wait (seconds) between depth hazards once you have rooms on floor 3 or deeper.")]
+        public float hazardMinSeconds = 45f;
+        [Tooltip("Longest wait (seconds) between depth hazards.")]
+        public float hazardMaxSeconds = 80f;
+        [Tooltip("Maximum simultaneous hazards across the station.")]
+        public int maxActiveHazards = 2;
+        [Tooltip("Seconds for one rested crew member to seal a pressure leak.")]
+        public float leakFixSeconds = 10f;
+        [Tooltip("Oxygen per second lost to an active pressure leak.")]
+        public float leakOxygenDrain = 0.8f;
+        [Tooltip("Seconds for one rested crew member to vent and cool a heat vent.")]
+        public float heatVentFixSeconds = 11f;
+        [Tooltip("Stamina drain multiplier for crew inside a room with an active heat vent.")]
+        public float heatVentStaminaFactor = 2.5f;
+        [Tooltip("Extra wear rate on machines inside a room with an active heat vent.")]
+        public float heatVentWearFactor = 2f;
+        [Tooltip("Seconds for one rested crew member to drive off a light-attracted creature.")]
+        public float creatureFixSeconds = 9f;
+        [Tooltip("Power per second drained while a creature clings to a room.")]
+        public float creaturePowerDrain = 0.9f;
 
         [Header("Emergency tanks")]
         [Tooltip("Reserve oxygen canisters under the station. Applies on the next dive.")]

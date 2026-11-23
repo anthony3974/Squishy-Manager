@@ -21,6 +21,10 @@ namespace DeepStation
         public const float SurfaceY = 16f;
         public const float DeepY = -40f;
 
+        /// <summary>How deep the station can be dug, so the bottom floor stays above DeepY.</summary>
+        public const int MaxFloors = 8;
+        public const int Columns = 2;
+
         /// <summary>Visible world width the camera aims for in portrait.</summary>
         public const float ViewWidth = 10f;
 

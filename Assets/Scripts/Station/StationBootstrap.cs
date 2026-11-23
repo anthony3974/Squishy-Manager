@@ -21,6 +21,7 @@ namespace DeepStation
             go.AddComponent<StationView>();
             go.AddComponent<StationCamera>();
             go.AddComponent<StationHud>();
+            go.AddComponent<BuildMenu>();
         }
     }
 }

@@ -5,6 +5,15 @@ namespace DeepStation
 {
     public enum RoomType { Quarters, Scrubber, Generator }
 
+    /// <summary>Depth hazards that unlock floor by floor as the station expands downward.</summary>
+    public enum RoomHazard
+    {
+        None,
+        PressureLeak, // Floor 3+ (index >= 2): drains oxygen until sealed
+        HeatVent,     // Floor 4+ (index >= 3): scorches room, rapid fatigue & wear until cooled
+        Creature      // Floor 5+ (index >= 4): drawn to lit windows, drains power until driven off
+    }
+
     /// <summary>One personality trait per crew member, each with a small effect shown on selection.</summary>
     public enum CrewTrait
     {
@@ -37,8 +46,20 @@ namespace DeepStation
         /// <summary>Crew assigned here, including any still walking over.</summary>
         public readonly List<CrewMember> Assigned = new List<CrewMember>();
 
+        /// <summary>0-1 construction progress. Crew must be sent here to build it; it does nothing until finished.</summary>
+        public float BuildProgress = 1f;
+        public bool Ready => BuildProgress >= 1f;
+        /// <summary>True when crew can actually sleep here (finished Quarters with no active hazard).</summary>
+        public bool CanRest => Type == RoomType.Quarters && Ready && !HasHazard;
+
+        /// <summary>Active depth hazard in this room, if any.</summary>
+        public RoomHazard Hazard = RoomHazard.None;
+        /// <summary>0-1 progress toward clearing the active hazard.</summary>
+        public float HazardProgress;
+        public bool HasHazard => Hazard != RoomHazard.None;
+
         /// <summary>Machines wear out and break; Quarters never do.</summary>
-        public bool CanBreak => Type != RoomType.Quarters;
+        public bool CanBreak => Type != RoomType.Quarters && Ready;
         /// <summary>Seconds this machine has run since it was last fixed.</summary>
         public float Wear;
         /// <summary>Running seconds this machine lasts before breaking. Re-rolled after each repair.</summary>
@@ -52,7 +73,13 @@ namespace DeepStation
         /// <summary>Crew here who have fainted (not counted in Present).</summary>
         public int Fainted;
         public float Workforce;
-        /// <summary>Crew actually repairing right now, and their combined efficiency.</summary>
+        /// <summary>Crew actively building this unfinished room, and their combined efficiency.</summary>
+        public int Builders;
+        public float BuildWork;
+        /// <summary>Crew actively clearing this room's hazard, and their combined efficiency.</summary>
+        public int HazardFixers;
+        public float HazardWork;
+        /// <summary>Crew ready to repair right now (off cooldown), and their combined efficiency.</summary>
         public int Repairers;
         public float RepairWork;
         /// <summary>Running and close to breaking: shakes and smokes as a warning.</summary>
@@ -121,6 +148,10 @@ namespace DeepStation
         public Room RepairedRoom;
         /// <summary>Set every tick: fixing a broken machine right now.</summary>
         public bool IsRepairing;
+        /// <summary>Set every tick: constructing an unfinished room right now.</summary>
+        public bool IsBuilding;
+        /// <summary>Set every tick: clearing a depth hazard right now.</summary>
+        public bool IsFixingHazard;
         /// <summary>Seconds until a crew member who fainted from lack of air comes round. 0 = awake.</summary>
         public float FaintTime;
 
@@ -128,7 +159,7 @@ namespace DeepStation
         public bool IsFainted => FaintTime > 0f;
         public bool IsMoving => Path.Count > 0;
         public bool IsExhausted => Stamina <= 0.01f;
-        public bool IsResting => !IsMoving && Room.Type == RoomType.Quarters;
+        public bool IsResting => !IsMoving && Room.CanRest;
 
         public CrewMember(string name, Color color, CrewTrait trait, float stamina, Room job)
         {

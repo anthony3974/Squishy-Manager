@@ -95,11 +95,24 @@ namespace DeepStation
             else
             {
                 foreach (var room in station.Rooms)
-                    if (room.Broken && room.Alert == RoomAlert.Failing)
+                    if (room.HasHazard && room.Alert == RoomAlert.Failing)
                     {
-                        warning = $"{room.Name.ToUpperInvariant()} BROKEN  ·  send crew to repair";
+                        string h = room.Hazard == RoomHazard.PressureLeak ? "PRESSURE LEAK  ·  send crew to seal"
+                            : room.Hazard == RoomHazard.HeatVent ? "HEAT VENT  ·  send crew to cool"
+                            : "CREATURE OUTSIDE  ·  send crew to drive off";
+                        warning = $"{room.Name.ToUpperInvariant()}: {h}";
                         break;
                     }
+                if (warning == null)
+                    foreach (var room in station.Rooms)
+                        if (room.Broken && room.Alert == RoomAlert.Failing)
+                        {
+                            int needed = Mathf.Clamp(t.repairCrewRequired, 1, room.Capacity);
+                            warning = room.Present > 0 && needed > 1
+                                ? $"{room.Name.ToUpperInvariant()} BROKEN  ·  send a 2nd crew member"
+                                : $"{room.Name.ToUpperInvariant()} BROKEN  ·  send {needed} crew to repair";
+                            break;
+                        }
             }
             warningBackground.gameObject.SetActive(warning != null);
             if (warning != null)
@@ -109,7 +122,7 @@ namespace DeepStation
             }
 
             if (view.Selected != null)
-                hintText.text = $"Give {view.Selected.Name} a job: tap a room\n<size=26>{station.TraitText(view.Selected)}</size>";
+                hintText.text = $"Give {view.Selected.Name} a job: tap a room or build site\n<size=26>{station.TraitText(view.Selected)}</size>";
             else if (station.FaintedCount > 0 || station.SuffocationTime > 0f)
                 hintText.text = AirHint();
             else
@@ -120,8 +133,17 @@ namespace DeepStation
         string AirHint()
         {
             foreach (var room in station.Rooms)
+                if (room.Ready && room.Hazard == RoomHazard.PressureLeak && room.HazardFixers == 0)
+                    return $"Seal the pressure leak in {room.Name}: send a crew member";
+
+            // With more than one scrubber, only complain if none of them is staffed and working.
+            string problem = null;
+            bool anyScrubber = false;
+            int needed = Mathf.Clamp(station.tuning.repairCrewRequired, 1, 2);
+            foreach (var room in station.Rooms)
             {
-                if (room.Type != RoomType.Scrubber) continue;
+                if (room.Type != RoomType.Scrubber || !room.Ready) continue;
+                anyScrubber = true;
                 CrewMember holder = null;
                 bool atPost = false;
                 foreach (var crew in station.Crew)
@@ -130,10 +152,16 @@ namespace DeepStation
                     holder = crew;
                     if (crew.Room == room) atPost = true;
                 }
-                if (holder == null) return "Nobody's on the Oxygen Scrubber: give someone that job";
-                if (!atPost) return $"{holder.Name} is resting: send them to the Scrubber early";
-                if (room.Broken) return "The Oxygen Scrubber is broken: its crew will fix it";
+                string issue = room.HasHazard ? $"{room.Name} has a hazard: send crew to clear it"
+                    : room.Broken ? (room.Assigned.Count < needed ? $"{room.Name} is broken: send {needed} crew to repair it" : $"{room.Name} is being repaired")
+                    : holder == null ? $"Nobody's on the {room.Name}: give someone that job"
+                    : !atPost ? $"{holder.Name} is resting: send them to the {room.Name} early"
+                    : null;
+                if (issue == null) { problem = null; break; }
+                if (problem == null) problem = issue;
             }
+            if (!anyScrubber) return "Build an Oxygen Scrubber and send crew to finish it";
+            if (problem != null) return problem;
             if (station.PowerSupply < 0.98f) return "The scrubber needs power: put someone on the Generator";
             return station.FaintedCount > 0 ? "The crew will come round soon" : "Air is on its way";
         }

@@ -2,7 +2,7 @@
 
 A portrait mobile management game about keeping an underwater research station alive. You see the station side-on, as a cutaway sunk in dark water. You balance oxygen and power by sending three crew to walk between rooms, and every failure is visible and recoverable.
 
-This is **version 0.1.0**: Phases 1 and 2 plus a casual pass. Phase 1 answered "is keeping the station balanced fun for 5 minutes?" (yes). Phase 2 added failure and recovery: machines break down, crew repair them, and emergency oxygen tanks buy time. The casual pass made it relaxed: crew have standing jobs and rest on their own, everything runs about 2.5x slower, running out of air makes crew faint instead of ending the run, and the crew have traits, thoughts and small celebrations. See [PLAN.md](PLAN.md) for the full roadmap and the visual direction.
+This is **version 0.2.0**: Phases 1 and 2, the casual pass, and the first part of Phase 3 (expansion and depth). You can now dig downward and build new rooms (which crew have to walk over and construct), breakdowns require a second crew member to help repair, and deeper floors introduce floor-by-floor hazards (pressure leaks, heat vents, and light-attracted creatures). See [PLAN.md](PLAN.md) for the full roadmap and the visual direction.
 
 ## Running it
 
@@ -37,14 +37,28 @@ The station builds itself at startup (`StationBootstrap`), so the scene needs no
 - At zero stamina, crew keep working at half speed instead of stopping. An amber dot means tired; a flashing red dot means exhausted.
 - A room flashes a red outline when it's failing: no power, or no crew while its resource is low.
 
+### Building and digging down
+
+- Tap any empty `+` slot on an existing floor (**BUILD**, 30 power) or below the bottom floor (**DIG DOWN**, 50 power: 30 room + 20 to dig) to open the build sheet and pick a room type. The simulation pauses while the sheet is open.
+- Paying power lays down scaffolding, and the site flashes amber (**NEEDS CREW**) until you send someone there. One crew member finishes a room in about 30 s, two finish twice as fast, and Theo's Tinkerer trait speeds up construction too.
+- You can expand down to 8 floors; the ladder shaft extends and the emergency O2 tanks move below the new bottom floor automatically.
+
 ### Breakdowns and repairs
 
-- The Generator and Scrubber wear out while crew work them, and break after 150–250 s of running time. Idle machines don't wear.
+- The Generator and Scrubber wear out while crew work them, and break after 85–145 s of running time. Idle machines don't wear.
 - For the last 10 s before a breakdown the machine rattles, shakes and puffs smoke, and the room says **RATTLING**.
 - A broken machine stops, smokes and sparks, and its meter turns white to show repair progress.
-- Crew in a broken room repair it on their own. One crew member takes about 8 s, two take about 4 s, and exhausted crew go at half speed. Repairing drains stamina a quarter faster than normal work.
-- After finishing a repair, a crew member can't repair again for 12 s. A wrench and a shrinking bar above their head show the wait while they're in the room they fixed or at a broken machine.
-- The room outline is red only when a broken machine has nobody on the way. Once crew are repairing it, or walking there, it turns amber.
+- Repairs require **2 crew** in the room at the same time (off cooldown). A solo operator waits with a red **NEED 2 CREW** alert until you send a second crew member to help. Two crew finish in about 4 s (faster with Theo); exhausted crew work at half speed. Repairing drains stamina a quarter faster than normal work.
+- After finishing a repair, those crew can't repair again for 12 s. A wrench and a shrinking bar above their head show the wait while they're in the room they fixed or at a broken machine.
+- The room outline is red until enough crew are present or walking over; once a full repair team is on it, it turns amber.
+
+### Depth hazards
+
+Each deeper floor unlocks a new hazard (warned on the build sheet before you dig, capped at 2 active hazards at once):
+
+- **Floor 3+ — Pressure leaks:** A hull crack sprays water into the room and drains 0.8 O2/s until crew seal it (~10 s).
+- **Floor 4+ — Heat vents:** A glowing floor grate fills the room with steam, causing 2.5x fatigue, wearing down machines, and blocking rest in Quarters until crew cool it (~11 s).
+- **Floor 5+ — Light-attracted creatures:** A bioluminescent deep-sea creature glides up to the outer window, flickers the room's lights, and drains 0.9 power/s until crew drive it off (~9 s).
 
 ### Emergency tanks
 
@@ -65,7 +79,7 @@ The station builds itself at startup (`StationBootstrap`), so the scene needs no
 | Crew | Trait |
 | --- | --- |
 | Mara | Tireless: tires 25% slower |
-| Theo | Tinkerer: repairs 50% faster |
+| Theo | Tinkerer: fixes & builds 50% faster |
 | Juno | Quick napper: rests 40% faster |
 
 - Selecting a crew member shows their name under their feet and their trait in the bottom hint.
@@ -83,7 +97,7 @@ The station builds itself at startup (`StationBootstrap`), so the scene needs no
 - With Unity open, use **Tools > Android > Build APK** instead.
 - The build script (`Assets/Editor/AndroidBuild.cs`) sets the Android settings every time: package `com.Tony3974.DeepSeaStation`, name "Deep-Sea Station", portrait only, IL2CPP, ARM64.
 - To release, copy the APK to `~/APKs/` and run `~/fdroid/release.sh`, which publishes it to fdroid.tonycad.com.
-- Before each new release, raise the version code (Player Settings > Android > Bundle Version Code). F-Droid only offers an update when the code goes up. 0.1.0 shipped as code 1.
+- Before each new release, raise the version code (Player Settings > Android > Bundle Version Code). F-Droid only offers an update when the code goes up. 0.1.0 shipped as code 1; 0.2.0 is code 2.
 
 ## Tuning
 
@@ -103,7 +117,8 @@ All code is in `Assets/Scripts/Station/`:
 | `StationView.cs` | Draws the ocean, critters, rooms, crew (poses, job badges, fainting, thought bubbles), breakdown effects, repair sparkles and the tank rack, and handles taps |
 | `StationCamera.cs` | Fits the camera to portrait, handles drag scrolling, and turns taps into world positions |
 | `StationHud.cs` | The slim resource bar with tank pips, warning line, milestone toast and hint |
+| `BuildMenu.cs` | Bottom build sheet for picking a room type, showing power cost and floor hazards |
 | `UIKit.cs` | Generated sprites, UI helpers, safe-area fitter |
 | `StationBootstrap.cs` | Spawns everything when you press Play |
 
-The Android build script is separate, in `Assets/Editor/AndroidBuild.cs`, with a shell wrapper in `Tools/android-build.sh`.
+Editor scripts live in `Assets/Editor/`: `AndroidBuild.cs` (with shell wrapper `Tools/android-build.sh`) and EditMode simulation tests in `StationTests.cs`.

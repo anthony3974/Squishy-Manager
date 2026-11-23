@@ -12,6 +12,7 @@ namespace DeepStation
     {
         Camera cam;
         StationView view;
+        BuildMenu menu;
         bool pressing, dragging;
         Vector2 downPosition, lastPosition;
         float velocity;
@@ -19,6 +20,7 @@ namespace DeepStation
         void Start()
         {
             view = GetComponent<StationView>();
+            menu = GetComponent<BuildMenu>();
             cam = Camera.main;
             if (cam == null)
             {
@@ -55,6 +57,14 @@ namespace DeepStation
             if (cam == null) return;
             float dt = Time.unscaledDeltaTime;
             float y = cam.transform.position.y;
+
+            // The build menu takes all input while it's open; forget any press that started under it.
+            if (menu != null && menu.IsOpen)
+            {
+                pressing = dragging = false;
+                velocity = 0f;
+                return;
+            }
 
             var pointer = Pointer.current;
             if (pointer != null)

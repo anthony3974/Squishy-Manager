@@ -2,7 +2,7 @@
 
 **Core idea:** Expand a research station downward, room by room. Three resources (oxygen, power, heat), visible failures, and slow fallbacks so one mistake never snowballs.
 
-**Current status:** Phases 1 and 2 and the casual pass (see below) are built, playtested, and released as version 0.1.0 on the F-Droid repo. Phase 3 is next.
+**Current status:** Phases 1, 2, the casual pass, and the first part of Phase 3 (crew-operated building/digging, 2-crew repairs, and floor-by-floor depth hazards) are built as version 0.2.0 (code 2). Heat as the 3rd resource and playtesting Phase 3 are next.
 
 ## Phase 1: Prototype (the fun test) ✅ built, playtested
 
@@ -47,11 +47,16 @@ The loop worked but was too stressful: constantly rotating crew to keep two mete
 5. **Crew feel like people** ✅ built. Each crew member has one trait with a small, shown effect (Mara Tireless, Theo Tinkerer, Juno Quick napper). One thought bubble at a time, mostly hints while something's wrong and small talk otherwise. Crew who aren't working idle (foot tap, glance, stretch), and fully rested off-duty crew get up out of bed.
 6. **Small rewards** ✅ built. Sparkle burst and a floating "Fixed!" on every repair. Calm toasts for minutes survived, tanks refilled, and air restored. No menus.
 
-## Phase 3: Expansion and depth
+## Phase 3: Expansion and depth (in progress)
 
-- Build new floors downward, each costing resources
-- Each floor adds one new hazard: pressure leaks, then heat vents, then light-attracted creatures
+- Build new floors downward, each costing power; **crew must walk to the site to build and dig** ✅ built
+- **Team repairs:** broken machines require a second crew member to help repair, so breakdowns ask for a real player decision instead of self-healing ✅ built
+- Each deeper floor adds one new hazard ✅ built:
+  - Floor 3+: **pressure leaks** (drains O2 until sealed)
+  - Floor 4+: **heat vents** (rapid fatigue and machine wear until cooled)
+  - Floor 5+: **light-attracted creatures** (clings to lit windows and drains power until driven off)
 - Add heat as the third resource once the first two feel solid
+- **Maybe plan (active goal room):** add a progress room (e.g., Research Lab, Core Drill, or Dive Pod) that competes for the 3rd crew member—keeping survival calm while making progress requires active shuffling between more rooms/tasks than crew.
 
 ## Phase 4: Mobile polish
 

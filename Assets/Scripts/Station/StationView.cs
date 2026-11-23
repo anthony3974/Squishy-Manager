@@ -41,8 +41,8 @@ namespace DeepStation
         // Sorting orders, back to front.
         const int OceanOrder = -100, RayOrder = -95, CritterOrder = -90, TetherOrder = -60, SpillOrder = -50,
             ShaftOrder = -30, HullOrder = 0, WallOrder = 1, GlowOrder = 2, FrameOrder = 3, GlassOrder = 4,
-            LampOrder = 5, MachineOrder = 6, SlabOrder = 9, CrewOrder = 10, TargetOrder = 19, AlarmOrder = 20,
-            MeterOrder = 25, LabelOrder = 30;
+            LampOrder = 5, MachineOrder = 6, SlabOrder = 13, CrewOrder = 14, TargetOrder = 24, AlarmOrder = 25,
+            MeterOrder = 30, LabelOrder = 35;
 
         const float LabelScale = 0.01f;
 
@@ -68,6 +68,41 @@ namespace DeepStation
             public float SmokeClock;
             public readonly List<SpriteRenderer> Smoke = new List<SpriteRenderer>();
             public readonly List<Spark> Sparks = new List<Spark>();
+
+            // Construction: scaffolding over a dark room that fades away, and lights that come on.
+            public GameObject Construction;
+            public readonly List<SpriteRenderer> SiteParts = new List<SpriteRenderer>();
+            public readonly List<float> SiteAlpha = new List<float>();
+            public readonly List<SpriteRenderer> Lights = new List<SpriteRenderer>();
+            public readonly List<float> LightAlpha = new List<float>();
+            public SpriteRenderer Welder;
+            public Rect WeldArea;
+            public float Built, WeldClock;
+
+            // Depth hazards (floor >= 2).
+            public float HazardClock;
+            public GameObject LeakGroup;
+            public readonly List<SpriteRenderer> LeakDrops = new List<SpriteRenderer>();
+            public SpriteRenderer LeakPuddle;
+            public Vector2 LeakOrigin;
+            public float LeakDir;
+            public GameObject HeatGroup;
+            public SpriteRenderer HeatGlow;
+            public readonly List<SpriteRenderer> HeatSteam = new List<SpriteRenderer>();
+            public GameObject CreatureGroup;
+            public Transform CreatureBody;
+            public Transform[] CreatureTentacles;
+            public Vector2 CreatureOutside, CreatureAtWindow;
+            public float CreatureSlide;
+        }
+
+        /// <summary>An empty spot where a room can go: a faint outline with a "+" to tap.</summary>
+        class SlotView
+        {
+            public int Floor, Column;
+            public Transform Root;
+            public SpriteRenderer Outline, Fill;
+            public Text Label;
         }
 
         class Spark
@@ -138,8 +173,14 @@ namespace DeepStation
         }
 
         Station station;
+        BuildMenu menu;
         Transform stationRoot;
         Transform labelRoot;
+        /// <summary>Tether, ladder shaft and emergency tanks: rebuilt when a new floor is dug.</summary>
+        Transform frameRoot;
+        Text tankLabel;
+        int frameFloors;
+        readonly List<SlotView> slotViews = new List<SlotView>();
         Sprite wallGradient;
         readonly List<RoomView> roomViews = new List<RoomView>();
         readonly List<CrewView> crewViews = new List<CrewView>();
@@ -173,11 +214,15 @@ namespace DeepStation
         void Start()
         {
             station = GetComponent<Station>();
+            menu = GetComponent<BuildMenu>();
             wallGradient = Sprites.VerticalGradient(WallTop, WallBottom);
             BuildOcean();
             BuildStation();
             station.Rebuilt += Rebuild;
             station.RepairFinished += OnRepairFinished;
+            station.RoomAdded += OnRoomAdded;
+            station.RoomBuilt += OnRoomBuilt;
+            station.HazardCleared += OnHazardCleared;
         }
 
         void OnDestroy()
@@ -185,17 +230,44 @@ namespace DeepStation
             if (station == null) return;
             station.Rebuilt -= Rebuild;
             station.RepairFinished -= OnRepairFinished;
+            station.RoomAdded -= OnRoomAdded;
+            station.RoomBuilt -= OnRoomBuilt;
+            station.HazardCleared -= OnHazardCleared;
         }
 
         void Rebuild()
         {
             Selected = null;
             if (stationRoot != null) Destroy(stationRoot.gameObject);
+            frameRoot = null;
+            tankLabel = null;
             roomViews.Clear();
             crewViews.Clear();
             tankViews.Clear();
+            slotViews.Clear();
             popups.Clear();
             BuildStation();
+        }
+
+        /// <summary>A new room was ordered: draw it under construction, and extend the shaft if it's a new floor.</summary>
+        void OnRoomAdded(Room room)
+        {
+            if (station.FloorCount != frameFloors) BuildFrame();
+            roomViews.Add(BuildRoom(room));
+            BuildSlots();
+        }
+
+        void OnRoomBuilt(Room room)
+        {
+            SpawnPopup(room.Bounds.center + new Vector2(0f, 0.2f), "Ready!");
+        }
+
+        void OnHazardCleared(Room room, RoomHazard hazard)
+        {
+            string label = hazard == RoomHazard.PressureLeak ? "Sealed!"
+                : hazard == RoomHazard.HeatVent ? "Cooled!"
+                : "Driven off!";
+            SpawnPopup(room.Bounds.center + new Vector2(0f, 0.2f), label);
         }
 
         // ------------------------------------------------------------------ input
@@ -233,12 +305,25 @@ namespace DeepStation
                 }
             }
 
+            foreach (var slot in slotViews)
+            {
+                var hit = StationLayout.RoomBounds(slot.Floor, slot.Column);
+                hit.xMin -= 0.15f;
+                hit.xMax += 0.15f;
+                if (hit.Contains(world))
+                {
+                    Selected = null;
+                    if (menu != null) menu.Open(slot.Floor, slot.Column);
+                    return;
+                }
+            }
+
             Selected = null;
         }
 
         /// <summary>
         /// Would tapping this room give the selected crew member an order? True for any room
-        /// they aren't in, including their own job while they're resting (pulls them out of bed).
+        /// they aren't in, including build sites and their own job while they're resting.
         /// Tapping the room they're in cycles through its occupants instead.
         /// </summary>
         bool IsOrder(Room room) => Selected != null && Selected.Room != room;
@@ -277,7 +362,21 @@ namespace DeepStation
             UpdateThoughts(Time.deltaTime);
             foreach (var v in crewViews) UpdateCrew(v, t, pulse);
             foreach (var v in tankViews) UpdateTank(v, pulse);
+            UpdateSlots();
             UpdatePopups(Time.deltaTime);
+        }
+
+        /// <summary>Empty spots breathe gently; the one the build menu is open for lights up.</summary>
+        void UpdateSlots()
+        {
+            // Unscaled: the build menu pauses the game, and its slot should still glow.
+            float breathe = 0.5f + 0.5f * Mathf.Sin(Time.unscaledTime * 1.8f);
+            foreach (var s in slotViews)
+            {
+                bool chosen = menu != null && menu.IsOpen && menu.Floor == s.Floor && menu.Column == s.Column;
+                s.Outline.color = WithAlpha(chosen ? Teal : SlotColor, chosen ? 0.95f : 0.22f + 0.16f * breathe);
+                s.Fill.color = WithAlpha(Teal, chosen ? 0.16f : 0.04f + 0.03f * breathe);
+            }
         }
 
         // ------------------------------------------------------------------ thoughts
@@ -371,18 +470,7 @@ namespace DeepStation
             foreach (var v in roomViews) if (v.Room == room) view = v;
             if (view == null) return;
 
-            var popup = new RepairPopup { Origin = view.SmokeOrigin };
-            for (int i = 0; i < 12; i++)
-            {
-                float angle = i / 12f * Mathf.PI * 2f + Range(-0.2f, 0.2f);
-                popup.Velocities.Add(new Vector2(Mathf.Cos(angle), Mathf.Sin(angle) * 0.8f + 0.3f) * Range(0.6f, 1f));
-                popup.Sparks.Add(Shape(stationRoot, "Sparkle", Sprites.Circle, i % 2 == 0 ? SparkColor : Teal, popup.Origin,
-                    new Vector2(0.09f, 0.09f), MeterOrder + 2));
-            }
-            popup.Text = Label("Fixed", popup.Origin, new Vector2(2f, 0.4f), 26, SparkColor, TextAnchor.MiddleCenter, FontStyle.Bold);
-            popup.Text.text = "Fixed!";
-            popup.Text.gameObject.AddComponent<Outline>().effectColor = new Color(0f, 0f, 0f, 0.6f);
-            popups.Add(popup);
+            SpawnPopup(view.SmokeOrigin, "Fixed!");
 
             // Whoever did the work is pleased with it.
             foreach (var v in crewViews)
@@ -392,6 +480,22 @@ namespace DeepStation
                     thoughtTimer = Mathf.Max(thoughtTimer, 6f);
                     break;
                 }
+        }
+
+        void SpawnPopup(Vector2 origin, string text)
+        {
+            var popup = new RepairPopup { Origin = origin };
+            for (int i = 0; i < 12; i++)
+            {
+                float angle = i / 12f * Mathf.PI * 2f + Range(-0.2f, 0.2f);
+                popup.Velocities.Add(new Vector2(Mathf.Cos(angle), Mathf.Sin(angle) * 0.8f + 0.3f) * Range(0.6f, 1f));
+                popup.Sparks.Add(Shape(stationRoot, "Sparkle", Sprites.Circle, i % 2 == 0 ? SparkColor : Teal, popup.Origin,
+                    new Vector2(0.09f, 0.09f), MeterOrder + 2));
+            }
+            popup.Text = Label(text, popup.Origin, new Vector2(2f, 0.4f), 26, SparkColor, TextAnchor.MiddleCenter, FontStyle.Bold);
+            popup.Text.text = text;
+            popup.Text.gameObject.AddComponent<Outline>().effectColor = new Color(0f, 0f, 0f, 0.6f);
+            popups.Add(popup);
         }
 
         void UpdatePopups(float dt)
@@ -439,10 +543,10 @@ namespace DeepStation
             v.Target.enabled = IsOrder(room);
             if (v.Target.enabled) v.Target.color = WithAlpha(Color.white, 0.2f + 0.35f * pulse);
 
-            // While broken the meter tracks repair progress instead of output.
+            // While broken, building, or clearing a hazard the meter tracks progress instead of output.
             float fill = Mathf.Clamp01(room.Meter);
             v.MeterFill.enabled = fill > 0.001f;
-            v.MeterFill.color = WithAlpha(room.Broken ? RepairColor : v.MeterColor, 0.85f);
+            v.MeterFill.color = WithAlpha(room.Broken || !room.Ready || room.HasHazard ? RepairColor : v.MeterColor, 0.85f);
             var scale = v.MeterFill.transform.localScale;
             v.MeterFill.transform.localScale = new Vector3(v.MeterWidth * fill, scale.y, 1f);
 
@@ -472,6 +576,117 @@ namespace DeepStation
             }
 
             if (v.Machine != null) UpdateBreakdownEffects(v, time, dt);
+            if (v.Construction != null) UpdateConstruction(v, dt);
+            UpdateHazardEffects(v, time, dt);
+        }
+
+        /// <summary>
+        /// A welding spark hops around the scaffolding while crew build the room. When it's done,
+        /// the scaffolding fades out and the room's lights come up.
+        /// </summary>
+        void UpdateConstruction(RoomView v, float dt)
+        {
+            var room = v.Room;
+            v.Built = room.Ready ? Mathf.MoveTowards(v.Built, 1f, dt / 0.9f) : 0f;
+
+            float site = 1f - v.Built;
+            for (int i = 0; i < v.SiteParts.Count; i++)
+                v.SiteParts[i].color = WithAlpha(v.SiteParts[i].color, v.SiteAlpha[i] * site);
+            float lit = Mathf.Lerp(0.12f, 1f, v.Built);
+            for (int i = 0; i < v.Lights.Count; i++)
+                v.Lights[i].color = WithAlpha(v.Lights[i].color, v.LightAlpha[i] * lit);
+
+            if (!room.Ready && room.Builders > 0)
+            {
+                v.WeldClock += dt;
+                int hop = Mathf.FloorToInt(v.WeldClock / 0.7f);
+                var weldRng = new System.Random(hop * 7919 + room.Floor * 31 + room.Column);
+                var a = v.WeldArea;
+                v.Welder.transform.position = new Vector2(a.x + (float)weldRng.NextDouble() * a.width, a.y + (float)weldRng.NextDouble() * a.height);
+                float flicker = Mathf.Repeat(v.WeldClock, 0.7f) < 0.45f ? 0.5f + 0.5f * Mathf.Sin(v.WeldClock * 60f) : 0f;
+                v.Welder.color = WithAlpha(SparkColor, flicker);
+            }
+            else v.Welder.color = Color.clear;
+
+            if (v.Built >= 1f)
+            {
+                Destroy(v.Construction);
+                v.Construction = null;
+            }
+        }
+
+        /// <summary>Visuals for floor-by-floor depth hazards: spraying leaks, thermal vents, and abyssal creatures.</summary>
+        void UpdateHazardEffects(RoomView v, float time, float dt)
+        {
+            var room = v.Room;
+            v.HazardClock += dt;
+
+            if (v.LeakGroup != null)
+            {
+                bool leak = room.Hazard == RoomHazard.PressureLeak;
+                v.LeakGroup.SetActive(leak);
+                if (leak)
+                {
+                    float pulse = 0.5f + 0.5f * Mathf.Sin(time * 5f);
+                    v.LeakPuddle.color = WithAlpha(C(64, 190, 224), 0.35f + 0.12f * pulse);
+                    for (int i = 0; i < v.LeakDrops.Count; i++)
+                    {
+                        float p = Mathf.Repeat(v.HazardClock * 1.9f + i / (float)v.LeakDrops.Count, 1f);
+                        float x = v.LeakOrigin.x + v.LeakDir * (0.1f + p * 1.15f);
+                        float y = v.LeakOrigin.y + p * 0.25f - p * p * 1.15f;
+                        v.LeakDrops[i].transform.position = new Vector2(x, y);
+                        v.LeakDrops[i].color = WithAlpha(C(170, 240, 255), 0.9f * Mathf.Sin(p * Mathf.PI));
+                    }
+                }
+            }
+
+            if (v.HeatGroup != null)
+            {
+                bool heat = room.Hazard == RoomHazard.HeatVent;
+                v.HeatGroup.SetActive(heat);
+                if (heat)
+                {
+                    float pulse = 0.5f + 0.5f * Mathf.Sin(time * 4.5f);
+                    v.HeatGlow.color = WithAlpha(C(255, 96, 36), 0.22f + 0.12f * pulse);
+                    var b = room.Bounds;
+                    float floorY = b.y + StationLayout.SlabHeight;
+                    for (int i = 0; i < v.HeatSteam.Count; i++)
+                    {
+                        float p = Mathf.Repeat(v.HazardClock * 0.65f + i / (float)v.HeatSteam.Count, 1f);
+                        float baseX = Mathf.Lerp(b.xMin + 0.45f, b.xMax - 0.45f, (i + 0.5f) / v.HeatSteam.Count);
+                        float sway = Mathf.Sin((v.HazardClock + i) * 4f) * 0.12f;
+                        v.HeatSteam[i].transform.position = new Vector2(baseX + sway, floorY + 0.12f + p * 1.85f);
+                        float s = 0.16f + 0.28f * p;
+                        v.HeatSteam[i].transform.localScale = new Vector3(s, s, 1f);
+                        v.HeatSteam[i].color = WithAlpha(C(255, 146, 68), 0.5f * Mathf.Sin(p * Mathf.PI));
+                    }
+                }
+            }
+
+            if (v.CreatureGroup != null)
+            {
+                bool creature = room.Hazard == RoomHazard.Creature;
+                v.CreatureSlide = Mathf.MoveTowards(v.CreatureSlide, creature ? 1f : 0f, dt / 0.8f);
+                v.CreatureGroup.SetActive(v.CreatureSlide > 0.001f);
+                if (v.CreatureSlide > 0.001f)
+                {
+                    float ease = v.CreatureSlide * v.CreatureSlide * (3f - 2f * v.CreatureSlide);
+                    Vector2 bob = new Vector2(Mathf.Sin(time * 2.1f) * 0.06f, Mathf.Sin(time * 3.1f) * 0.1f);
+                    v.CreatureBody.position = Vector2.Lerp(v.CreatureOutside, v.CreatureAtWindow, ease) + bob;
+                    for (int i = 0; i < v.CreatureTentacles.Length; i++)
+                        v.CreatureTentacles[i].localRotation = Quaternion.Euler(0f, 0f, Mathf.Sin(time * 3.5f + i * 1.1f) * 18f);
+                }
+
+                // Dim and flicker room lights while a creature drains power outside the window.
+                if (v.Construction == null)
+                {
+                    float flicker = v.CreatureSlide > 0.001f
+                        ? Mathf.Lerp(1f, 0.4f + 0.22f * Mathf.Sin(time * 19f), v.CreatureSlide)
+                        : 1f;
+                    for (int i = 0; i < v.Lights.Count; i++)
+                        v.Lights[i].color = WithAlpha(v.Lights[i].color, v.LightAlpha[i] * flicker);
+                }
+            }
         }
 
         /// <summary>Rattling machines shake and puff a little smoke; broken ones smoke and spark.</summary>
@@ -602,9 +817,9 @@ namespace DeepStation
                 figurePos = new Vector3(0.5f, 0.58f, 0f);
                 breathe = 1f + 0.035f * Mathf.Sin(t * 2f);
             }
-            else if (crew.IsRepairing)
+            else if (crew.IsRepairing || crew.IsBuilding || crew.IsFixingHazard)
             {
-                // Repairing: quick, hard hammering at the machine.
+                // Repairing, building, or clearing a hazard: quick, hard hammering.
                 float speed = crew.IsExhausted ? 7f : 14f;
                 float hit = Mathf.Abs(Mathf.Sin(t * speed));
                 figurePos.y = hit * 0.025f;
@@ -613,7 +828,7 @@ namespace DeepStation
             }
             else if (crew.Room.Broken || stalled)
             {
-                // Waiting by a broken machine for their repair cooldown, or for power.
+                // Waiting by a broken machine for a helper or cooldown, or for power.
                 Idle(t, ref facing, ref figurePos, ref breathe, ref legSwing);
             }
             else
@@ -842,6 +1057,23 @@ namespace DeepStation
         {
             stationRoot = Group(transform, "Station", Vector2.zero);
             BuildLabelCanvas();
+            BuildFrame();
+
+            foreach (var room in station.Rooms)
+                roomViews.Add(BuildRoom(room));
+            foreach (var crew in station.Crew)
+                crewViews.Add(BuildCrew(crew));
+            BuildSlots();
+        }
+
+        /// <summary>The tether, ladder shaft and tank rack, sized to the current number of floors.</summary>
+        void BuildFrame()
+        {
+            if (frameRoot != null) Destroy(frameRoot.gameObject);
+            if (tankLabel != null) Destroy(tankLabel.gameObject);
+            tankViews.Clear();
+            frameRoot = Group(stationRoot, "Frame", Vector2.zero);
+            frameFloors = station.FloorCount;
 
             float roof = StationLayout.FloorBaseY(0) + StationLayout.RoomHeight + 0.12f;
             float floorOfStation = StationLayout.FloorBaseY(station.FloorCount - 1) - 0.12f;
@@ -849,33 +1081,64 @@ namespace DeepStation
             float shaftHeight = roof - floorOfStation;
 
             // Tether up to the surface, and the ladder shaft linking the floors.
-            Shape(stationRoot, "Tether", Sprites.Pixel, HullDark, new Vector2(StationLayout.LadderX, (roof + StationLayout.SurfaceY) * 0.5f),
+            Shape(frameRoot, "Tether", Sprites.Pixel, HullDark, new Vector2(StationLayout.LadderX, (roof + StationLayout.SurfaceY) * 0.5f),
                 new Vector2(0.14f, StationLayout.SurfaceY - roof), TetherOrder);
-            Shape(stationRoot, "Shaft", Sprites.WorldRounded, Hull, new Vector2(StationLayout.LadderX, shaftMid),
+            Shape(frameRoot, "Shaft", Sprites.WorldRounded, Hull, new Vector2(StationLayout.LadderX, shaftMid),
                 new Vector2(StationLayout.ShaftWidth + 0.12f, shaftHeight + 0.24f), ShaftOrder);
-            Shape(stationRoot, "Shaft Inside", Sprites.Pixel, C(20, 30, 40), new Vector2(StationLayout.LadderX, shaftMid),
+            Shape(frameRoot, "Shaft Inside", Sprites.Pixel, C(20, 30, 40), new Vector2(StationLayout.LadderX, shaftMid),
                 new Vector2(StationLayout.ShaftWidth - 0.2f, shaftHeight - 0.1f), ShaftOrder + 1);
             foreach (float side in new[] { -0.24f, 0.24f })
-                Shape(stationRoot, "Rail", Sprites.Pixel, C(104, 116, 126), new Vector2(StationLayout.LadderX + side, shaftMid),
+                Shape(frameRoot, "Rail", Sprites.Pixel, C(104, 116, 126), new Vector2(StationLayout.LadderX + side, shaftMid),
                     new Vector2(0.06f, shaftHeight - 0.1f), ShaftOrder + 2);
             for (float y = floorOfStation + 0.25f; y < roof - 0.1f; y += 0.32f)
-                Shape(stationRoot, "Rung", Sprites.Pixel, C(104, 116, 126), new Vector2(StationLayout.LadderX, y), new Vector2(0.48f, 0.05f), ShaftOrder + 2);
+                Shape(frameRoot, "Rung", Sprites.Pixel, C(104, 116, 126), new Vector2(StationLayout.LadderX, y), new Vector2(0.48f, 0.05f), ShaftOrder + 2);
 
             for (int floor = 0; floor < station.FloorCount; floor++)
             {
                 float baseY = StationLayout.FloorBaseY(floor);
-                Shape(stationRoot, "Shaft Light", Sprites.Glow, WithAlpha(Amber, 0.16f), new Vector2(StationLayout.LadderX, baseY + 1.3f),
+                Shape(frameRoot, "Shaft Light", Sprites.Glow, WithAlpha(Amber, 0.16f), new Vector2(StationLayout.LadderX, baseY + 1.3f),
                     new Vector2(1.8f, 2.2f), ShaftOrder + 3);
-                Shape(stationRoot, "Landing", Sprites.Pixel, SlabColor, new Vector2(StationLayout.LadderX, baseY + StationLayout.SlabHeight * 0.5f),
+                Shape(frameRoot, "Landing", Sprites.Pixel, SlabColor, new Vector2(StationLayout.LadderX, baseY + StationLayout.SlabHeight * 0.5f),
                     new Vector2(StationLayout.ShaftWidth, StationLayout.SlabHeight), SlabOrder);
             }
 
             BuildTanks(floorOfStation - 0.12f);
+        }
 
-            foreach (var room in station.Rooms)
-                roomViews.Add(BuildRoom(room));
-            foreach (var crew in station.Crew)
-                crewViews.Add(BuildCrew(crew));
+        static readonly Color SlotColor = C(170, 210, 225);
+
+        /// <summary>One faint outline per empty spot on the station's floors and on the floor below it.</summary>
+        void BuildSlots()
+        {
+            foreach (var s in slotViews)
+            {
+                Destroy(s.Root.gameObject);
+                Destroy(s.Label.gameObject);
+            }
+            slotViews.Clear();
+
+            for (int floor = 0; floor <= station.FloorCount; floor++)
+                for (int column = 0; column < StationLayout.Columns; column++)
+                    if (station.CanBuildAt(floor, column))
+                        slotViews.Add(BuildSlot(floor, column));
+        }
+
+        SlotView BuildSlot(int floor, int column)
+        {
+            var b = StationLayout.RoomBounds(floor, column);
+            var c = b.center;
+            var s = new SlotView { Floor = floor, Column = column };
+            s.Root = Group(stationRoot, "Build Slot", Vector2.zero);
+            var size = new Vector2(b.width - 0.2f, b.height - 0.1f);
+            s.Fill = Shape(s.Root, "Fill", Sprites.WorldRounded, WithAlpha(Teal, 0.05f), c, size, HullOrder);
+            s.Outline = Shape(s.Root, "Outline", Sprites.WorldOutline, WithAlpha(SlotColor, 0.3f), c, size, HullOrder + 1);
+            Shape(s.Root, "Plus", Sprites.Pixel, WithAlpha(SlotColor, 0.7f), c + new Vector2(0f, 0.35f), new Vector2(0.5f, 0.08f), HullOrder + 2);
+            Shape(s.Root, "Plus", Sprites.Pixel, WithAlpha(SlotColor, 0.7f), c + new Vector2(0f, 0.35f), new Vector2(0.08f, 0.5f), HullOrder + 2);
+
+            bool dig = station.IsNewFloor(floor);
+            s.Label = Label("Slot Label", c + new Vector2(0f, -0.35f), new Vector2(b.width, 0.6f), 22, DimLabel, TextAnchor.MiddleCenter, FontStyle.Bold);
+            s.Label.text = $"{(dig ? "DIG DOWN" : "BUILD")}\n<size=18>{station.BuildCost(floor):0} power</size>";
+            return s;
         }
 
         /// <summary>A rack of emergency oxygen canisters hanging under the bottom of the station.</summary>
@@ -887,7 +1150,7 @@ namespace DeepStation
             const float spacing = 0.46f, height = 0.8f;
             float top = stationBottom - 0.14f;
             float cy = top - height * 0.5f;
-            var g = Group(stationRoot, "Emergency Tanks", Vector2.zero);
+            var g = Group(frameRoot, "Emergency Tanks", Vector2.zero);
             Shape(g, "Rack", Sprites.Pixel, HullDark, new Vector2(StationLayout.LadderX, stationBottom - 0.06f),
                 new Vector2(count * spacing + 0.2f, 0.12f), HullOrder);
 
@@ -913,6 +1176,7 @@ namespace DeepStation
             var label = Label("Tank Label", new Vector2(StationLayout.LadderX, top - height - 0.24f), new Vector2(3f, 0.3f),
                 19, DimLabel, TextAnchor.MiddleCenter, FontStyle.Bold);
             label.text = "EMERGENCY O2";
+            tankLabel = label;
         }
 
         void BuildLabelCanvas()
@@ -951,16 +1215,16 @@ namespace DeepStation
             var g = Group(stationRoot, room.Name, Vector2.zero);
 
             // Shell: warm light spilling into the water, hull, lit back wall, ceiling lamp.
-            Shape(g, "Light Spill", Sprites.Glow, WithAlpha(Amber, 0.3f), c + new Vector2(0f, 0.2f), new Vector2(w * 2f, h * 2.3f), SpillOrder);
+            AddLight(v, Shape(g, "Light Spill", Sprites.Glow, WithAlpha(Amber, 0.3f), c + new Vector2(0f, 0.2f), new Vector2(w * 2f, h * 2.3f), SpillOrder));
             Shape(g, "Hull", Sprites.WorldRounded, Hull, c, new Vector2(w + 0.24f, h + 0.24f), HullOrder);
             Shape(g, "Back Wall", wallGradient, Color.white, c, new Vector2(w, h), WallOrder);
-            Shape(g, "Lamp Glow", Sprites.Glow, WithAlpha(Amber, 0.35f), new Vector2(c.x, b.yMax - 0.35f), new Vector2(w * 0.9f, 1.1f), GlowOrder);
+            AddLight(v, Shape(g, "Lamp Glow", Sprites.Glow, WithAlpha(Amber, 0.35f), new Vector2(c.x, b.yMax - 0.35f), new Vector2(w * 0.9f, 1.1f), GlowOrder));
             Shape(g, "Lamp", Sprites.Pixel, LampColor, new Vector2(c.x, b.yMax - 0.05f), new Vector2(w * 0.45f, 0.07f), LampOrder);
 
             foreach (float side in new[] { -1f, 1f })
             {
                 var p = new Vector2(c.x + side * 1.15f, b.y + 1.95f);
-                Shape(g, "Window Glow", Sprites.Glow, WithAlpha(Amber, 0.3f), p, new Vector2(1.3f, 1.3f), GlowOrder);
+                AddLight(v, Shape(g, "Window Glow", Sprites.Glow, WithAlpha(Amber, 0.3f), p, new Vector2(1.3f, 1.3f), GlowOrder));
                 Shape(g, "Window Frame", Sprites.Circle, C(74, 86, 100), p, new Vector2(0.66f, 0.66f), FrameOrder);
                 Shape(g, "Window", Sprites.Circle, GlassColor, p, new Vector2(0.52f, 0.52f), GlassOrder);
                 Shape(g, "Glint", Sprites.Circle, C(120, 200, 220, 110), p + new Vector2(-0.1f, 0.1f), new Vector2(0.13f, 0.13f), GlassOrder + 1);
@@ -1006,6 +1270,9 @@ namespace DeepStation
                 }
             }
 
+            if (!room.Ready) BuildConstruction(v, g);
+            if (room.Floor >= 2) BuildHazards(v, g);
+
             v.Target = Shape(g, "Target Outline", Sprites.WorldOutline, Color.white, c, new Vector2(w + 0.46f, h + 0.46f), TargetOrder);
             v.Alarm = Shape(g, "Alarm Outline", Sprites.WorldOutline, WarningRed, c, new Vector2(w + 0.5f, h + 0.5f), AlarmOrder);
             v.Target.enabled = v.Alarm.enabled = false;
@@ -1023,6 +1290,133 @@ namespace DeepStation
             name.text = room.Name.ToUpperInvariant();
             v.Status = Label("Status", new Vector2(c.x, meterY + 0.36f), new Vector2(w, 0.32f), 24, WarningRed, TextAnchor.MiddleRight, FontStyle.Bold);
             return v;
+        }
+
+        static void AddLight(RoomView v, SpriteRenderer light)
+        {
+            v.Lights.Add(light);
+            v.LightAlpha.Add(light.color.a);
+        }
+
+        /// <summary>Scaffolding over a darkened room: poles, planks, braces, caution tape and a welder.</summary>
+        void BuildConstruction(RoomView v, Transform parent)
+        {
+            var b = v.Room.Bounds;
+            var c = b.center;
+            float floorY = b.y + StationLayout.SlabHeight;
+            float top = b.yMax - 0.08f;
+            var site = Group(parent, "Construction", Vector2.zero);
+            v.Construction = site.gameObject;
+            // Sits behind the floor slab and crew so builders stay visible inside the site.
+            const int order = MachineOrder + 4;
+            Color wood = C(150, 116, 72), steel = C(120, 132, 142);
+
+            void Part(SpriteRenderer sr)
+            {
+                v.SiteParts.Add(sr);
+                v.SiteAlpha.Add(sr.color.a);
+            }
+
+            Part(Shape(site, "Dark", Sprites.Pixel, C(8, 16, 26, 200), c, new Vector2(b.width, b.height), order));
+
+            float[] poles = { b.xMin + 0.35f, c.x, b.xMax - 0.35f };
+            float[] levels = { floorY, floorY + 0.95f, floorY + 1.9f };
+            foreach (float x in poles)
+                Part(Shape(site, "Pole", Sprites.Pixel, steel, new Vector2(x, (floorY + top) * 0.5f), new Vector2(0.07f, top - floorY), order + 1));
+            for (int level = 1; level < levels.Length; level++)
+                Part(Shape(site, "Plank", Sprites.Pixel, wood, new Vector2(c.x, levels[level]), new Vector2(b.width - 0.5f, 0.1f), order + 2));
+
+            // One diagonal brace per bay per level, alternating direction.
+            for (int bay = 0; bay < poles.Length - 1; bay++)
+                for (int level = 0; level < levels.Length - 1; level++)
+                {
+                    var from = new Vector2(poles[bay], levels[level]);
+                    var to = new Vector2(poles[bay + 1], levels[level + 1]);
+                    if ((bay + level) % 2 == 1) { float x = from.x; from.x = to.x; to.x = x; }
+                    var d = to - from;
+                    Part(Shape(site, "Brace", Sprites.Pixel, WithAlpha(steel, 0.75f), (from + to) * 0.5f,
+                        new Vector2(d.magnitude, 0.045f), order + 1, Mathf.Atan2(d.y, d.x) * Mathf.Rad2Deg));
+                }
+
+            // Caution tape along the floor.
+            const float stripe = 0.22f;
+            int stripes = Mathf.FloorToInt(b.width / stripe);
+            float start = c.x - stripes * stripe * 0.5f + stripe * 0.5f;
+            for (int i = 0; i < stripes; i++)
+                Part(Shape(site, "Tape", Sprites.Pixel, i % 2 == 0 ? Caution : C(30, 26, 22), new Vector2(start + i * stripe, floorY + 0.06f),
+                    new Vector2(stripe, 0.1f), order + 2));
+
+            v.Welder = Shape(site, "Welder", Sprites.Glow, Color.clear, c, new Vector2(0.55f, 0.55f), CrewOrder + 7);
+            v.WeldArea = new Rect(b.xMin + 0.4f, floorY + 0.3f, b.width - 0.8f, 1.7f);
+
+            // Lights start nearly off and come up when the room is finished.
+            for (int i = 0; i < v.Lights.Count; i++)
+                v.Lights[i].color = WithAlpha(v.Lights[i].color, v.LightAlpha[i] * 0.12f);
+        }
+
+        /// <summary>Builds hidden visual props for the hazards unlocked at this room's depth.</summary>
+        void BuildHazards(RoomView v, Transform parent)
+        {
+            var room = v.Room;
+            var b = room.Bounds;
+            var c = b.center;
+            float floorY = b.y + StationLayout.SlabHeight;
+            float outerX = room.Column == 0 ? b.xMin : b.xMax;
+            float inward = room.Column == 0 ? 1f : -1f;
+
+            // Floor 3+ (index >= 2): Pressure leak crack, water spray, and floor puddle.
+            var leak = Group(parent, "Pressure Leak", Vector2.zero);
+            v.LeakGroup = leak.gameObject;
+            v.LeakOrigin = new Vector2(outerX + inward * 0.05f, floorY + 1.05f);
+            v.LeakDir = inward;
+            Shape(leak, "Crack A", Sprites.Pixel, C(12, 34, 50), v.LeakOrigin + new Vector2(inward * 0.08f, 0.12f), new Vector2(0.32f, 0.06f), CrewOrder - 1, inward * -32f);
+            Shape(leak, "Crack B", Sprites.Pixel, C(12, 34, 50), v.LeakOrigin + new Vector2(inward * 0.14f, -0.04f), new Vector2(0.28f, 0.05f), CrewOrder - 1, inward * 24f);
+            v.LeakPuddle = Shape(leak, "Puddle", Sprites.WorldRoundedSmall, C(64, 190, 224, 110), new Vector2(c.x, floorY + 0.09f), new Vector2(b.width - 0.12f, 0.22f), CrewOrder - 1);
+            for (int i = 0; i < 6; i++)
+                v.LeakDrops.Add(Shape(leak, "Drop", Sprites.Circle, Color.clear, v.LeakOrigin, new Vector2(0.1f, 0.1f), CrewOrder + 5));
+            v.LeakGroup.SetActive(false);
+
+            // Floor 4+ (index >= 3): Hydrothermal heat vent glow and rising steam.
+            if (room.Floor >= 3)
+            {
+                var heat = Group(parent, "Heat Vent", Vector2.zero);
+                v.HeatGroup = heat.gameObject;
+                v.HeatGlow = Shape(heat, "Glow", Sprites.Glow, Color.clear, new Vector2(c.x, floorY + 0.6f), new Vector2(b.width * 1.1f, b.height * 0.9f), GlowOrder + 1);
+                Shape(heat, "Vent Grate", Sprites.WorldRoundedSmall, C(255, 92, 30, 210), new Vector2(c.x, floorY + 0.03f), new Vector2(b.width * 0.65f, 0.12f), CrewOrder - 1);
+                for (int i = 0; i < 5; i++)
+                    v.HeatSteam.Add(Shape(heat, "Steam", Sprites.Circle, Color.clear, c, new Vector2(0.2f, 0.2f), CrewOrder + 5));
+                v.HeatGroup.SetActive(false);
+            }
+
+            // Floor 5+ (index >= 4): Light-attracted abyssal creature clinging outside the window.
+            if (room.Floor >= 4)
+            {
+                var cg = Group(parent, "Abyssal Creature", Vector2.zero);
+                v.CreatureGroup = cg.gameObject;
+                float outDir = -inward;
+                v.CreatureAtWindow = new Vector2(outerX + outDir * 0.58f, b.y + 1.65f);
+                v.CreatureOutside = new Vector2(outerX + outDir * 2.4f, b.y + 1.55f);
+                v.CreatureBody = Group(cg, "Body", v.CreatureOutside);
+
+                Color bodyColor = C(24, 18, 46);
+                Color glowColor = C(140, 120, 255);
+                Color eyeColor = C(140, 255, 240);
+                Shape(v.CreatureBody, "Halo", Sprites.Glow, WithAlpha(glowColor, 0.45f), Vector2.zero, new Vector2(1.9f, 1.9f), HullOrder + 1);
+                Shape(v.CreatureBody, "Mantle", Sprites.Circle, bodyColor, Vector2.zero, new Vector2(0.86f, 0.72f), HullOrder + 2);
+                Shape(v.CreatureBody, "Crest", Sprites.Circle, WithAlpha(glowColor, 0.55f), new Vector2(outDir * 0.12f, 0.12f), new Vector2(0.55f, 0.34f), HullOrder + 3);
+                // Two glowing eyes peering toward the room's window.
+                Shape(v.CreatureBody, "Eye Top", Sprites.Circle, eyeColor, new Vector2(-outDir * 0.2f, 0.1f), new Vector2(0.13f, 0.13f), HullOrder + 4);
+                Shape(v.CreatureBody, "Eye Bot", Sprites.Circle, eyeColor, new Vector2(-outDir * 0.22f, -0.09f), new Vector2(0.11f, 0.11f), HullOrder + 4);
+
+                v.CreatureTentacles = new Transform[4];
+                for (int i = 0; i < 4; i++)
+                {
+                    var pivot = Group(v.CreatureBody, "Tentacle", new Vector2(outDir * (i * 0.12f - 0.12f), -0.22f));
+                    Shape(pivot, "Strand", Sprites.PixelTop, WithAlpha(glowColor, 0.65f), Vector2.zero, new Vector2(0.055f, 0.75f + (i % 2) * 0.22f), HullOrder + 2);
+                    v.CreatureTentacles[i] = pivot;
+                }
+                v.CreatureGroup.SetActive(false);
+            }
         }
 
         void BuildGenerator(RoomView v, Transform g, float cx, float floorY)

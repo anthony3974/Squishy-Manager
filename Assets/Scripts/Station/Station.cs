@@ -5,8 +5,9 @@ using UnityEngine;
 namespace DeepStation
 {
     /// <summary>
-    /// The simulation: two station-wide resources (oxygen, power), three rooms, three crew who
-    /// walk between them, machines that wear out and get repaired, and emergency oxygen tanks.
+    /// The simulation: two station-wide resources (oxygen, power), rooms the player adds floor by
+    /// floor, three crew who walk between them, machines that wear out and get repaired, and
+    /// emergency oxygen tanks.
     /// Knows nothing about rendering; StationView and StationHud read it.
     /// </summary>
     public class Station : MonoBehaviour
@@ -25,6 +26,14 @@ namespace DeepStation
         public event Action<Room> RepairFinished;
         /// <summary>Something good happened worth a short pop-up (minutes survived, tank refilled, air back).</summary>
         public event Action<string> Milestone;
+        /// <summary>The player ordered a new room. It starts under construction.</summary>
+        public event Action<Room> RoomAdded;
+        /// <summary>A room finished building and is ready for crew.</summary>
+        public event Action<Room> RoomBuilt;
+        /// <summary>A depth hazard began in a deep room.</summary>
+        public event Action<Room, RoomHazard> HazardStarted;
+        /// <summary>Crew cleared a depth hazard.</summary>
+        public event Action<Room, RoomHazard> HazardCleared;
 
         public float Oxygen { get; private set; }
         public float Power { get; private set; }
@@ -59,8 +68,6 @@ namespace DeepStation
         }
 
         public int FloorCount { get; private set; }
-        /// <summary>Where crew rest. Every crew member is either at their job or here.</summary>
-        public Room Quarters { get; private set; }
         public bool OxygenLow => Oxygen <= tuning.maxOxygen * tuning.lowWarning;
         public bool PowerLow => Power <= tuning.maxPower * tuning.lowWarning;
         public float SuffocationLeft => Mathf.Max(0f, tuning.suffocationSeconds - SuffocationTime);
@@ -78,12 +85,10 @@ namespace DeepStation
             var scrubber = AddRoom("Oxygen Scrubber", RoomType.Scrubber, 0, 1);
             var generator = AddRoom("Generator", RoomType.Generator, 1, 0);
 
-            Quarters = quarters;
-
-            // Juno starts the dive resting, and joins Mara on the Generator once rested.
+            // Mara runs power and Theo runs air; Juno starts off-duty in Quarters ready for your first order.
             AddCrew("Mara", new Color32(240, 200, 110, 255), CrewTrait.Tireless, 100f, generator, generator);
             AddCrew("Theo", new Color32(110, 215, 200, 255), CrewTrait.Tinkerer, 75f, scrubber, scrubber);
-            AddCrew("Juno", new Color32(190, 165, 245, 255), CrewTrait.QuickNapper, 40f, generator, quarters);
+            AddCrew("Juno", new Color32(190, 165, 245, 255), CrewTrait.QuickNapper, 85f, quarters, quarters);
 
             Tanks.Clear();
             for (int i = 0; i < Mathf.Max(0, tuning.emergencyTanks); i++)
@@ -94,6 +99,8 @@ namespace DeepStation
 
             FloorCount = 0;
             foreach (var room in Rooms) FloorCount = Mathf.Max(FloorCount, room.Floor + 1);
+            announcedFloor = FloorCount - 1;
+            hazardTimer = -1f;
 
             Oxygen = tuning.startOxygen;
             Power = tuning.startPower;
@@ -103,6 +110,76 @@ namespace DeepStation
             airCrisis = false;
             Tick(0f);
             Rebuilt?.Invoke();
+        }
+
+        // ------------------------------------------------------------------ building
+
+        public Room RoomAt(int floor, int column)
+        {
+            foreach (var room in Rooms)
+                if (room.Floor == floor && room.Column == column) return room;
+            return null;
+        }
+
+        /// <summary>An empty spot on an existing floor, or on the floor just below the station.</summary>
+        public bool CanBuildAt(int floor, int column) =>
+            floor >= 0 && floor < StationLayout.MaxFloors && floor <= FloorCount
+            && column >= 0 && column < StationLayout.Columns && RoomAt(floor, column) == null;
+
+        public bool IsNewFloor(int floor) => floor >= FloorCount;
+
+        /// <summary>Power to build a room here: the room, plus digging if it's a new floor.</summary>
+        public float BuildCost(int floor) => tuning.roomPowerCost + (IsNewFloor(floor) ? tuning.newFloorPowerCost : 0f);
+
+        public bool CanAfford(int floor) => Power >= BuildCost(floor) - 0.001f;
+
+        /// <summary>Pay the power and start building. Crew must be sent here to finish it.</summary>
+        public Room Build(RoomType type, int floor, int column)
+        {
+            if (!CanBuildAt(floor, column) || !CanAfford(floor)) return null;
+            Power = Mathf.Max(0f, Power - BuildCost(floor));
+            var room = AddRoom(NewRoomName(type), type, floor, column);
+            room.BuildProgress = 0f;
+            FloorCount = Mathf.Max(FloorCount, floor + 1);
+            if (floor > announcedFloor)
+            {
+                announcedFloor = floor;
+                if (floor == 2) Milestone?.Invoke("Floor 3: watch for pressure leaks");
+                else if (floor == 3) Milestone?.Invoke("Floor 4: watch for heat vents");
+                else if (floor == 4) Milestone?.Invoke("Floor 5: creatures lurk in the dark");
+            }
+            UpdateStatus(room, PowerSupply);
+            RoomAdded?.Invoke(room);
+            return room;
+        }
+
+        public static string TypeName(RoomType type) =>
+            type == RoomType.Generator ? "Generator" : type == RoomType.Scrubber ? "Oxygen Scrubber" : "Living Quarters";
+
+        /// <summary>"Generator 2", "Scrubber 2", "Quarters 2": short enough to share the label line with a warning.</summary>
+        string NewRoomName(RoomType type)
+        {
+            int same = 1;
+            foreach (var room in Rooms)
+                if (room.Type == type) same++;
+            string shortName = type == RoomType.Generator ? "Generator" : type == RoomType.Scrubber ? "Scrubber" : "Quarters";
+            return $"{shortName} {same}";
+        }
+
+        void UpdateConstruction(float dt)
+        {
+            foreach (var room in Rooms)
+            {
+                if (room.Ready || room.BuildWork <= 0f) continue;
+                room.BuildProgress = Mathf.Min(1f, room.BuildProgress + room.BuildWork / Mathf.Max(1f, tuning.buildSeconds) * dt);
+                if (!room.Ready) continue;
+                room.Wear = 0f;
+                room.WearLimit = NextWearLimit();
+                if (room.Floor >= 2 && hazardTimer < 0f)
+                    hazardTimer = UnityEngine.Random.Range(25f, 40f);
+                RoomBuilt?.Invoke(room);
+                Milestone?.Invoke($"{room.Name} is ready");
+            }
         }
 
         Room AddRoom(string name, RoomType type, int floor, int column)
@@ -155,7 +232,7 @@ namespace DeepStation
 
             // A tired crew member the player sends to work keeps going until exhausted, so the
             // order isn't immediately undone by auto-rest.
-            crew.KeepWorking = target.Type != RoomType.Quarters && crew.Stamina <= tuning.autoRestAt;
+            crew.KeepWorking = !target.CanRest && crew.Stamina <= tuning.autoRestAt;
             crew.WaitingForBed = false;
             bool moved = MoveTo(crew, target);
             if (swapped != null) Settle(swapped);
@@ -194,7 +271,7 @@ namespace DeepStation
         /// <summary>Make sure a crew member is at their job or resting in Quarters, nowhere else.</summary>
         void Settle(CrewMember crew)
         {
-            if (crew.Room != crew.Job && crew.Room != Quarters)
+            if (crew.Room != crew.Job && !crew.Room.CanRest)
                 MoveTo(crew, crew.Job);
         }
 
@@ -212,7 +289,6 @@ namespace DeepStation
         /// </summary>
         void UpdateRest()
         {
-            if (Quarters == null) return;
             var t = tuning;
             float rested = Mathf.Min(t.autoReturnAt, MaxStamina) - 0.01f;
 
@@ -220,7 +296,7 @@ namespace DeepStation
             {
                 crew.WaitingForBed = false;
                 if (crew.IsResting) crew.KeepWorking = false;
-                if (crew.IsResting && !crew.IsFainted && crew.Job != Quarters && crew.Stamina >= rested)
+                if (crew.IsResting && !crew.IsFainted && crew.Job != crew.Room && crew.Stamina >= rested)
                     MoveTo(crew, crew.Job);
             }
 
@@ -231,18 +307,37 @@ namespace DeepStation
             restQueue.Sort((a, b) => a.Stamina.CompareTo(b.Stamina));
             foreach (var crew in restQueue)
             {
-                if (Quarters.FreeSlot() >= 0) MoveTo(crew, Quarters);
+                var bed = BedFor(crew);
+                if (bed != null) MoveTo(crew, bed);
                 else crew.WaitingForBed = true;
             }
+        }
+
+        /// <summary>The nearest finished Quarters with a free bed and no hazard, or null.</summary>
+        Room BedFor(CrewMember crew)
+        {
+            Room best = null;
+            int bestDistance = int.MaxValue;
+            foreach (var room in Rooms)
+            {
+                if (!room.CanRest || room.FreeSlot() < 0) continue;
+                int distance = Mathf.Abs(room.Floor - crew.Room.Floor);
+                if (distance < bestDistance)
+                {
+                    best = room;
+                    bestDistance = distance;
+                }
+            }
+            return best;
         }
 
         readonly List<CrewMember> restQueue = new List<CrewMember>();
 
         bool NeedsRest(CrewMember crew)
         {
-            if (crew.IsFainted || crew.IsMoving || crew.Room == Quarters) return false;
-            // Finish the repair in hand unless completely spent.
-            if (crew.IsRepairing && !crew.IsExhausted) return false;
+            if (crew.IsFainted || crew.IsMoving || crew.Room.CanRest) return false;
+            // Finish the repair or hazard in hand unless completely spent.
+            if ((crew.IsRepairing || crew.IsFixingHazard) && !crew.IsExhausted) return false;
             return crew.KeepWorking ? crew.IsExhausted : crew.Stamina <= tuning.autoRestAt;
         }
 
@@ -258,7 +353,7 @@ namespace DeepStation
             switch (crew.Trait)
             {
                 case CrewTrait.Tireless: return $"Tireless: tires {Percent(1f - tuning.tirelessDrainFactor)}% slower";
-                case CrewTrait.Tinkerer: return $"Tinkerer: repairs {Percent(tuning.tinkererRepairFactor - 1f)}% faster";
+                case CrewTrait.Tinkerer: return $"Tinkerer: fixes & builds {Percent(tuning.tinkererRepairFactor - 1f)}% faster";
                 default: return $"Quick napper: rests {Percent(tuning.quickNapperRestFactor - 1f)}% faster";
             }
         }
@@ -270,6 +365,9 @@ namespace DeepStation
         static readonly int[] MilestoneMinutes = { 2, 5, 10, 15, 20, 30, 45, 60 };
         int nextMilestone;
         bool airCrisis;
+        int announcedFloor;
+        float hazardTimer = -1f;
+        readonly List<Room> hazardCandidates = new List<Room>();
 
         /// <summary>Minutes survived, and the air coming back after tanks venting or crew fainting.</summary>
         void UpdateMilestones()
@@ -320,19 +418,27 @@ namespace DeepStation
                 else Walk(crew, dt);
                 crew.RepairCooldown = Mathf.Max(0f, crew.RepairCooldown - dt);
                 crew.IsRepairing = false;
+                crew.IsBuilding = false;
+                crew.IsFixingHazard = false;
             }
 
-            // Who is actually on the job, and what does that make and cost? Crew in a broken
-            // room repair it instead of producing anything.
+            // Who is actually on the job, and what does that make and cost? Crew in unfinished,
+            // hazard-struck, or broken rooms handle that work instead of producing resources.
             float powerMade = 0f;
             float powerWanted = 0f;
+            float leakDrain = 0f;
             foreach (var room in Rooms)
             {
                 room.Present = 0;
                 room.Fainted = 0;
                 room.Workforce = 0f;
+                room.Builders = 0;
+                room.BuildWork = 0f;
+                room.HazardFixers = 0;
+                room.HazardWork = 0f;
                 room.Repairers = 0;
                 room.RepairWork = 0f;
+
                 foreach (var crew in room.Assigned)
                 {
                     if (crew.IsFainted)
@@ -342,14 +448,42 @@ namespace DeepStation
                     }
                     if (crew.IsMoving) continue;
                     room.Present++;
-                    room.Workforce += Efficiency(crew);
-                    if (room.Broken && crew.RepairCooldown <= 0f)
+                    float eff = Efficiency(crew);
+                    room.Workforce += eff;
+                    if (!room.Ready)
                     {
-                        crew.IsRepairing = true;
+                        crew.IsBuilding = true;
+                        room.Builders++;
+                        room.BuildWork += eff * RepairFactor(crew);
+                    }
+                    else if (room.HasHazard)
+                    {
+                        crew.IsFixingHazard = true;
+                        room.HazardFixers++;
+                        room.HazardWork += eff * RepairFactor(crew);
+                    }
+                    else if (room.Broken && crew.RepairCooldown <= 0f)
+                    {
                         room.Repairers++;
-                        room.RepairWork += Efficiency(crew) * RepairFactor(crew);
+                        room.RepairWork += eff * RepairFactor(crew);
                     }
                 }
+
+                // Breakdowns need a team (usually 2 crew) before repair work starts.
+                int repairNeeded = Mathf.Clamp(t.repairCrewRequired, 1, room.Capacity);
+                if (room.Ready && !room.HasHazard && room.Broken && room.Repairers >= repairNeeded)
+                {
+                    foreach (var crew in room.Assigned)
+                        if (!crew.IsFainted && !crew.IsMoving && crew.RepairCooldown <= 0f)
+                            crew.IsRepairing = true;
+                }
+
+                if (!room.Ready) continue;
+
+                if (room.Hazard == RoomHazard.Creature) powerWanted += t.creaturePowerDrain;
+                if (room.Hazard == RoomHazard.PressureLeak) leakDrain += t.leakOxygenDrain;
+
+                if (room.HasHazard) continue;
 
                 switch (room.Type)
                 {
@@ -379,12 +513,12 @@ namespace DeepStation
             PowerRate = powerMade - powerWanted;
             Power = Mathf.Clamp(Power + (powerMade - powerWanted * supply) * dt, 0f, t.maxPower);
 
-            // Oxygen, including whatever the emergency tanks give or take.
+            // Oxygen, including pressure leaks and whatever the emergency tanks give or take.
             float oxygenMade = 0f;
             foreach (var room in Rooms)
-                if (room.Type == RoomType.Scrubber && !room.Broken)
+                if (room.Type == RoomType.Scrubber && room.Ready && !room.Broken && !room.HasHazard)
                     oxygenMade += room.Workforce * t.scrubberOxygen * supply;
-            OxygenRate = oxygenMade - Crew.Count * t.breathePerCrew + TankFlow(dt);
+            OxygenRate = oxygenMade - Crew.Count * t.breathePerCrew - leakDrain + TankFlow(dt);
             Oxygen = Mathf.Clamp(Oxygen + OxygenRate * dt, 0f, t.maxOxygen);
 
             // Out of air: crack open the fullest tank before anyone starts suffocating.
@@ -395,19 +529,25 @@ namespace DeepStation
                         VentingTank = tank;
             }
 
-            // Stamina: work drains it, repairs drain it faster, Quarters restore it.
-            // Walking, and waiting in a broken room, do neither.
+            // Stamina: work and building drain it, repairs/hazards drain it faster, Quarters restore it.
+            // Heat vents multiply fatigue inside their room.
             float restSpeed = Mathf.Lerp(t.unpoweredRestFactor, 1f, supply);
             foreach (var crew in Crew)
             {
                 if (crew.IsMoving || crew.IsFainted) continue;
-                if (crew.Room.Type == RoomType.Quarters)
-                    crew.Stamina = Mathf.Min(MaxStamina, crew.Stamina + t.restStaminaGain * restSpeed * RestFactor(crew) * dt);
-                else if (crew.IsRepairing)
-                    crew.Stamina = Mathf.Max(0f, crew.Stamina - t.workStaminaDrain * t.repairStaminaFactor * DrainFactor(crew) * dt);
-                else if (!crew.Room.Broken)
+                float heat = crew.Room.Hazard == RoomHazard.HeatVent ? t.heatVentStaminaFactor : 1f;
+                if (crew.IsBuilding)
                     crew.Stamina = Mathf.Max(0f, crew.Stamina - t.workStaminaDrain * DrainFactor(crew) * dt);
+                else if (crew.IsFixingHazard || crew.IsRepairing)
+                    crew.Stamina = Mathf.Max(0f, crew.Stamina - t.workStaminaDrain * t.repairStaminaFactor * heat * DrainFactor(crew) * dt);
+                else if (crew.Room.CanRest)
+                    crew.Stamina = Mathf.Min(MaxStamina, crew.Stamina + t.restStaminaGain * restSpeed * RestFactor(crew) * dt);
+                else if (crew.Room.Ready && !crew.Room.Broken && !crew.Room.HasHazard)
+                    crew.Stamina = Mathf.Max(0f, crew.Stamina - t.workStaminaDrain * heat * DrainFactor(crew) * dt);
             }
+
+            UpdateConstruction(dt);
+            UpdateHazards(dt);
 
             foreach (var room in Rooms)
                 UpdateWear(room, supply, dt);
@@ -510,7 +650,94 @@ namespace DeepStation
             return -t.tankRefillRate;
         }
 
-        /// <summary>Machines wear while running, rattle as a warning, break, and get repaired.</summary>
+        /// <summary>Depth hazards: pressure leaks (floor 3+), heat vents (floor 4+), creatures (floor 5+).</summary>
+        void UpdateHazards(float dt)
+        {
+            var t = tuning;
+            int active = 0;
+            hazardCandidates.Clear();
+
+            foreach (var room in Rooms)
+            {
+                if (!room.Ready) continue;
+                if (room.HasHazard)
+                {
+                    active++;
+                    if (room.HazardWork > 0f)
+                    {
+                        float duration = HazardSeconds(room.Hazard);
+                        room.HazardProgress += room.HazardWork / Mathf.Max(1f, duration) * dt;
+                        if (room.HazardProgress >= 1f)
+                        {
+                            var cleared = room.Hazard;
+                            room.Hazard = RoomHazard.None;
+                            room.HazardProgress = 0f;
+                            active--;
+                            HazardCleared?.Invoke(room, cleared);
+                            continue;
+                        }
+                    }
+
+                    // Heat vents also wear down machines in their room until cooled.
+                    if (room.Hazard == RoomHazard.HeatVent && room.CanBreak && !room.Broken)
+                    {
+                        room.Wear += dt * t.heatVentWearFactor * 0.5f;
+                        if (room.Wear >= room.WearLimit)
+                        {
+                            room.Broken = true;
+                            room.RepairProgress = 0f;
+                        }
+                    }
+                }
+                else if (!room.Broken && room.Floor >= 2)
+                {
+                    hazardCandidates.Add(room);
+                }
+            }
+
+            if (hazardCandidates.Count == 0 || active >= Mathf.Max(1, t.maxActiveHazards))
+                return;
+
+            if (hazardTimer < 0f)
+                hazardTimer = NextHazardWait();
+
+            hazardTimer -= dt;
+            if (hazardTimer > 0f) return;
+
+            var target = hazardCandidates[UnityEngine.Random.Range(0, hazardCandidates.Count)];
+            target.Hazard = PickHazardForFloor(target.Floor);
+            target.HazardProgress = 0f;
+            hazardTimer = NextHazardWait();
+            HazardStarted?.Invoke(target, target.Hazard);
+        }
+
+        float HazardSeconds(RoomHazard hazard)
+        {
+            switch (hazard)
+            {
+                case RoomHazard.PressureLeak: return tuning.leakFixSeconds;
+                case RoomHazard.HeatVent: return tuning.heatVentFixSeconds;
+                default: return tuning.creatureFixSeconds;
+            }
+        }
+
+        float NextHazardWait()
+        {
+            float a = Mathf.Max(5f, tuning.hazardMinSeconds);
+            float b = Mathf.Max(5f, tuning.hazardMaxSeconds);
+            return UnityEngine.Random.Range(Mathf.Min(a, b), Mathf.Max(a, b));
+        }
+
+        static RoomHazard PickHazardForFloor(int floor)
+        {
+            if (floor <= 2) return RoomHazard.PressureLeak;
+            float r = UnityEngine.Random.value;
+            if (floor == 3) return r < 0.65f ? RoomHazard.HeatVent : RoomHazard.PressureLeak;
+            if (r < 0.55f) return RoomHazard.Creature;
+            return r < 0.8f ? RoomHazard.HeatVent : RoomHazard.PressureLeak;
+        }
+
+        /// <summary>Machines wear while running, rattle as a warning, break, and get repaired by a team.</summary>
         void UpdateWear(Room room, float supply, float dt)
         {
             room.Rattling = false;
@@ -518,6 +745,9 @@ namespace DeepStation
 
             if (room.Broken)
             {
+                int needed = Mathf.Clamp(tuning.repairCrewRequired, 1, room.Capacity);
+                if (room.HasHazard || room.Repairers < needed) return;
+
                 room.RepairProgress += room.RepairWork / Mathf.Max(0.1f, tuning.repairSeconds) * dt;
                 if (room.RepairProgress >= 1f)
                 {
@@ -536,6 +766,8 @@ namespace DeepStation
                 }
                 return;
             }
+
+            if (room.HasHazard) return;
 
             bool running = room.Workforce > 0f && (room.Type != RoomType.Scrubber || supply > 0.02f);
             if (!running) return;
@@ -599,7 +831,9 @@ namespace DeepStation
                     if (crew.IsMoving && !crew.IsFainted) helpComing = true;
             bool tired = room.Present > 0 && room.Workforce < room.Present - 0.001f;
 
-            if (room.Broken) BrokenStatus(room, helpComing);
+            if (!room.Ready) ConstructionStatus(room, helpComing);
+            else if (room.HasHazard) HazardStatus(room, helpComing);
+            else if (room.Broken) BrokenStatus(room, helpComing);
             else WorkingStatus(room, supply, helpComing, tired);
 
             // Fainted crew override everything else on the room, with the cause and a time.
@@ -610,6 +844,70 @@ namespace DeepStation
                     if (crew.IsFainted) wake = Mathf.Max(wake, crew.FaintTime);
                 room.RateText = $"no air  ·  waking in ~{Mathf.CeilToInt(wake)}s";
                 Set(room, RoomAlert.Failing, "CREW FAINTED");
+            }
+        }
+
+        void ConstructionStatus(Room room, bool helpComing)
+        {
+            room.Activity = 0f;
+            room.Meter = room.BuildProgress;
+            int pct = Mathf.FloorToInt(room.BuildProgress * 100f);
+
+            if (room.Builders > 0)
+            {
+                float left = (1f - room.BuildProgress) * Mathf.Max(1f, tuning.buildSeconds) / Mathf.Max(0.01f, room.BuildWork);
+                room.RateText = $"building {pct}%  ~{Mathf.CeilToInt(left)}s";
+                Set(room, RoomAlert.Idle, "");
+            }
+            else if (helpComing)
+            {
+                room.RateText = "crew on the way";
+                Set(room, RoomAlert.Idle, "");
+            }
+            else if (RestingOnJob(room, out var rester, out float back))
+            {
+                room.RateText = RestingText(rester, back);
+                Set(room, RoomAlert.Idle, "CREW RESTING");
+            }
+            else
+            {
+                room.RateText = pct > 0 ? $"paused at {pct}%  ·  send crew" : "send crew to build";
+                Set(room, RoomAlert.Warning, "NEEDS CREW");
+            }
+        }
+
+        void HazardStatus(Room room, bool helpComing)
+        {
+            room.Activity = 0f;
+            room.Meter = room.HazardProgress;
+            int pct = Mathf.FloorToInt(room.HazardProgress * 100f);
+
+            string title = room.Hazard == RoomHazard.PressureLeak ? "PRESSURE LEAK"
+                : room.Hazard == RoomHazard.HeatVent ? "HEAT VENT"
+                : "CREATURE";
+            string action = room.Hazard == RoomHazard.PressureLeak ? "sealing"
+                : room.Hazard == RoomHazard.HeatVent ? "cooling"
+                : "driving off";
+
+            if (room.HazardFixers > 0)
+            {
+                float left = (1f - room.HazardProgress) * Mathf.Max(1f, HazardSeconds(room.Hazard)) / Mathf.Max(0.01f, room.HazardWork);
+                room.RateText = $"{action} {pct}%  ~{Mathf.CeilToInt(left)}s";
+                Set(room, RoomAlert.Warning, title);
+            }
+            else if (helpComing)
+            {
+                room.RateText = "crew on the way";
+                Set(room, RoomAlert.Warning, title);
+            }
+            else
+            {
+                room.RateText = room.Hazard == RoomHazard.PressureLeak
+                    ? $"-{tuning.leakOxygenDrain:0.0} O2/s  ·  send crew"
+                    : room.Hazard == RoomHazard.HeatVent
+                    ? $"{tuning.heatVentStaminaFactor:0.0}x fatigue  ·  send crew"
+                    : $"-{tuning.creaturePowerDrain:0.0} power/s  ·  send crew";
+                Set(room, RoomAlert.Failing, title);
             }
         }
 
@@ -658,43 +956,64 @@ namespace DeepStation
         }
 
         /// <summary>
-        /// A broken machine is red only when nobody is on the way to fix it. Once repairs are
-        /// under way (or crew are heading there) it drops to amber.
+        /// A broken machine needs a repair team (default 2 crew) and flashes red until enough crew
+        /// are present or walking over. Once enough crew are on it, it drops to amber.
         /// </summary>
         void BrokenStatus(Room room, bool helpComing)
         {
             room.Activity = 0f;
             room.Meter = room.RepairProgress;
 
-            if (room.Repairers > 0)
+            int needed = Mathf.Clamp(tuning.repairCrewRequired, 1, room.Capacity);
+            int assignedAwake = 0;
+            foreach (var crew in room.Assigned)
+                if (!crew.IsFainted) assignedAwake++;
+
+            if (room.Repairers >= needed)
             {
                 float left = (1f - room.RepairProgress) * tuning.repairSeconds / Mathf.Max(0.01f, room.RepairWork);
                 room.RateText = $"repairing {Mathf.FloorToInt(room.RepairProgress * 100f)}%  ~{Mathf.CeilToInt(left)}s";
                 Set(room, RoomAlert.Warning, "REPAIRING");
             }
-            else if (room.Present > 0)
+            else if (room.Present >= needed)
             {
-                // Everyone here repaired something recently and needs a moment.
-                float wait = float.MaxValue;
+                // Enough crew are here, just waiting on repair cooldown.
+                float wait = 0f;
                 foreach (var crew in room.Assigned)
-                    if (!crew.IsMoving && !crew.IsFainted) wait = Mathf.Min(wait, crew.RepairCooldown);
+                    if (!crew.IsMoving && !crew.IsFainted) wait = Mathf.Max(wait, crew.RepairCooldown);
                 room.RateText = $"crew can repair in {Mathf.CeilToInt(wait)}s";
                 Set(room, RoomAlert.Warning, "BROKEN");
             }
-            else if (helpComing)
+            else if (assignedAwake >= needed)
             {
-                room.RateText = "crew on the way";
+                room.RateText = "help on the way";
                 Set(room, RoomAlert.Warning, "BROKEN");
+            }
+            else if (room.Present > 0 || helpComing)
+            {
+                int shortBy = needed - assignedAwake;
+                room.RateText = $"{assignedAwake}/{needed} crew  ·  send {shortBy} more";
+                Set(room, RoomAlert.Failing, $"NEED {needed} CREW");
             }
             else if (RestingOnJob(room, out var rester, out float back))
             {
-                // Whoever has this job will fix it when they're back from rest.
-                room.RateText = RestingText(rester, back);
-                Set(room, RoomAlert.Warning, "BROKEN");
+                int holders = 0;
+                foreach (var crew in Crew)
+                    if (crew.Job == room) holders++;
+                if (holders >= needed)
+                {
+                    room.RateText = RestingText(rester, back);
+                    Set(room, RoomAlert.Warning, "BROKEN");
+                }
+                else
+                {
+                    room.RateText = $"send {needed} crew to repair";
+                    Set(room, RoomAlert.Failing, $"NEED {needed} CREW");
+                }
             }
             else
             {
-                room.RateText = "send crew to repair";
+                room.RateText = $"send {needed} crew to repair";
                 Set(room, RoomAlert.Failing, "BROKEN");
             }
         }
